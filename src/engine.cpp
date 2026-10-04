@@ -25,8 +25,6 @@
 #include <memory>
 #include <ostream>
 #include <sstream>
-#include <stdexcept>
-#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -50,78 +48,6 @@ constexpr auto StartFEN =
   "xxxxkxxxx/9/1x5x1/x1x1x1x1x/9/9/X1X1X1X1X/1X5X1/9/XXXXKXXXX w R2A2C2P5N2B2r2a2c2p5n2b2 0 1";
 constexpr int MaxHashMB  = Is64Bit ? 33554432 : 2048;
 int           MaxThreads = std::max(1024, 4 * int(get_hardware_concurrency()));
-
-namespace {
-
-constexpr std::string_view PieceToChar(" RACPNBK racpnbkXx");
-
-struct ParsedHistoryMove {
-    Move                 move = Move::none();
-    std::optional<Piece> movedIdentity;
-    std::optional<Piece> capturedIdentity;
-};
-
-Piece parse_history_identity(const Position& position,
-                             char            token,
-                             Color           expectedColor,
-                             const char*     role) {
-    const std::size_t idx = PieceToChar.find(token);
-    if (idx == std::string_view::npos || idx == NO_PIECE || idx >= PIECE_NB)
-        throw std::invalid_argument(std::string("invalid ") + role + " identity suffix");
-
-    const Piece pc = Piece(idx);
-    if (type_of(pc) < ROOK || type_of(pc) > BISHOP)
-        throw std::invalid_argument(std::string("invalid ") + role + " identity suffix");
-    if (color_of(pc) != expectedColor)
-        throw std::invalid_argument(std::string("wrong color for ") + role + " identity suffix");
-    if (position.rest_piece(pc) <= 0)
-        throw std::invalid_argument(std::string(role) + " identity is absent from the pool");
-    return pc;
-}
-
-ParsedHistoryMove parse_history_move(const Position& position, const std::string& token) {
-    if (token.size() < 4 || token.size() > 6)
-        throw std::invalid_argument(
-          "history move must contain four coordinates and valid identities");
-
-    ParsedHistoryMove parsed;
-    parsed.move = UCIEngine::to_move(position, token.substr(0, 4));
-    if (parsed.move == Move::none())
-        throw std::invalid_argument("illegal or malformed move in position history");
-
-    const bool movedDark = position.move_dark(parsed.move);
-    const bool capturedDark =
-      position.capture(parsed.move) && position.is_dark(parsed.move.to_sq());
-    const Color mover = position.side_to_move();
-
-    const std::size_t minimumSize = 4 + std::size_t(movedDark);
-    const std::size_t maximumSize = minimumSize + std::size_t(capturedDark);
-    if (token.size() < minimumSize || token.size() > maximumSize)
-        throw std::invalid_argument("identity suffix does not match the hidden move/capture");
-
-    std::size_t suffix = 4;
-    if (movedDark)
-        parsed.movedIdentity =
-          parse_history_identity(position, token[suffix++], mover, "moved-dark");
-    if (capturedDark && suffix < token.size())
-        parsed.capturedIdentity =
-          parse_history_identity(position, token[suffix++], ~mover, "captured-dark");
-
-    return parsed;
-}
-
-void apply_history_move(Position&                position,
-                        std::deque<StateInfo>&   states,
-                        const ParsedHistoryMove& parsed) {
-    states.emplace_back();
-    position.do_move(parsed.move, states.back());
-    if (parsed.movedIdentity)
-        position.do_flip(parsed.move.to_sq(), *parsed.movedIdentity);
-    if (parsed.capturedIdentity)
-        position.remove_rest_piece(*parsed.capturedIdentity);
-}
-
-}  // namespace
 
 Engine::Engine(std::optional<std::string> path) :
     binaryDirectory(path ? CommandLine::get_binary_directory(*path) : ""),
@@ -169,39 +95,7 @@ Engine::Engine(std::optional<std::string> path) :
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
 
-    options.add(  //
-      "ChasingRule", Option("github skyrule_Jieqi", "skyrule_Jieqi", [this](const Option&) {
-          search_clear();
-          return std::nullopt;
-      }));
-
     options.add("Move Overhead", Option(10, 0, 5000));
-
-#if !defined(ABJCHESS_RELEASE)
-    options.add("AggressiveLevel", Option(3, 0, 10));
-
-    const Option::OnChange clearSearch = [this](const Option&) {
-        search_clear();
-        return std::nullopt;
-    };
-
-    options.add("RevealBonusBase", Option(0, -256, 256, clearSearch));
-    options.add("RevealBonusPhase", Option(0, -256, 256, clearSearch));
-    options.add("RevealBonusPool", Option(0, -256, 256, clearSearch));
-    options.add("RevealBonusUnknown", Option(0, -256, 256, clearSearch));
-    options.add("RevealBonusComeback", Option(0, -256, 256, clearSearch));
-    options.add("RevealMoveOrder", Option(0, -16384, 16384, clearSearch));
-    options.add("RevealReduction", Option(0, -2180, 2180, clearSearch));
-    options.add("RevealPruningMargin", Option(0, -512, 512, clearSearch));
-    options.add("RevealQuietBase", Option(-12, -96, 96, clearSearch));
-    options.add("RevealQuietPhase", Option(0, -96, 96, clearSearch));
-    options.add("RevealQuietSafety", Option(24, -192, 192, clearSearch));
-    options.add("RevealQuietHighValue", Option(-12, -96, 96, clearSearch));
-    options.add("RevealQuietDiversity", Option(0, -96, 96, clearSearch));
-    options.add("RevealQuietComeback", Option(0, -96, 96, clearSearch));
-    options.add("RevealQuietMoveOrder", Option(0, -2048, 2048, clearSearch));
-    options.add("RevealQuietReduction", Option(0, -545, 545, clearSearch));
-#endif
 
     options.add("nodestime", Option(0, 0, 10000));
 
@@ -209,10 +103,13 @@ Engine::Engine(std::optional<std::string> path) :
 
     options.add("EvalFile", Option(NN::EvalFileDefaultNameBig));
 
+    load_networks();
     resize_threads();
 }
 
 std::uint64_t Engine::perft(const std::string& fen, Depth depth) {
+    verify_networks();
+
     return Benchmark::perft(fen, depth);
 }
 
@@ -254,21 +151,34 @@ void Engine::set_on_verify_networks(std::function<void(std::string_view)>&& f) {
 void Engine::wait_for_search_finished() { threads.main_thread()->wait_for_search_finished(); }
 
 void Engine::set_position(const std::string& fen, const std::vector<std::string>& moves) {
-    stop();
-    wait_for_search_finished();
+    constexpr std::string_view PieceToChar(" RACPNBK racpnbkXx");
 
-    auto     stagedStates = StateListPtr(new std::deque<StateInfo>(1));
-    Position stagedPosition;
-    stagedPosition.set(fen, &stagedStates->back());
+    // Drop the old state and create a new one
+    states = StateListPtr(new std::deque<StateInfo>(1));
+    pos.set(fen, &states->back());
 
-    for (const auto& token : moves)
+    for (const auto& move : moves)
     {
-        const ParsedHistoryMove parsed = parse_history_move(stagedPosition, token);
-        apply_history_move(stagedPosition, *stagedStates, parsed);
-    }
+        auto m = UCIEngine::to_move(pos, move);
 
-    pos.swap(stagedPosition);
-    states.swap(stagedStates);
+        if (m == Move::none())
+            break;
+
+        states->emplace_back();
+        pos.do_move(m, states->back());
+        if (move.length() == 5)
+        {
+            if (pos.is_dark(m.to_sq()))
+                pos.do_flip(m.to_sq(), Piece(PieceToChar.find(move[4])));
+            else
+                pos.rest_piece(Piece(PieceToChar.find(move[4])))--;
+        }
+        else if (move.length() == 6)
+        {
+            pos.do_flip(m.to_sq(), Piece(PieceToChar.find(move[4])));
+            pos.rest_piece(Piece(PieceToChar.find(move[5])))--;
+        }
+    }
 }
 
 // modifiers
@@ -317,7 +227,8 @@ void Engine::set_ponderhit(bool b) { threads.main_manager()->ponder = b; }
 
 void Engine::verify_networks() {
     if (std::string(options["EvalFile"]).empty())
-        throw std::runtime_error("ABJNNUE EvalFile is not set; send 'setoption name EvalFile value <path>' before searching");
+        throw std::runtime_error(
+          "ABJNNUE EvalFile is not set; send 'setoption name EvalFile value <path>' before searching");
 
     // Protocol initialization and move generation do not require a network.
     // Retry a missing default on each search, so installing it can recover
@@ -335,8 +246,6 @@ void Engine::verify_networks() {
             throw;
         }
     }
-
-    networks->big.verify(options["EvalFile"], onVerifyNetworks);
 }
 
 void Engine::load_networks() {
@@ -353,7 +262,7 @@ void Engine::load_networks() {
 
 void Engine::load_big_network(const std::string& file) {
     const std::string selectedFile = options["EvalFile"];
-    NN::NetworkBig loaded;
+    NN::NetworkBig    loaded;
     try
     {
         loaded.load(binaryDirectory, file);

@@ -62,7 +62,6 @@ struct TTEntry {
 
    private:
     friend class TranspositionTable;
-    friend struct TTWriter;
 
     uint16_t key16;
     uint8_t  depth8;
@@ -133,11 +132,6 @@ TTWriter::TTWriter(TTEntry* tte) :
 void TTWriter::write(
   Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t generation8) {
     entry->save(k, v, pv, b, d, m, ev, generation8);
-}
-
-void TTWriter::penalize(int penalty) {
-    const int depth = int(entry->depth8) - penalty;
-    entry->depth8  = uint8_t(depth > 0 ? depth : 0);
 }
 
 

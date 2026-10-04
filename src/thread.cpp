@@ -35,15 +35,6 @@
 
 namespace Stockfish {
 
-namespace {
-
-ChasingRule chasing_rule(const OptionsMap& options) {
-    return options["ChasingRule"] == "skyrule_Jieqi" ? CHASING_RULE_SKYRULE_JIEQI
-                                                     : CHASING_RULE_GITHUB;
-}
-
-}
-
 // Constructor launches the thread and waits until it goes to sleep
 // in idle_loop(). Note that 'searching' and 'exit' should be already set.
 Thread::Thread(Search::SharedState&                    sharedState,
@@ -146,8 +137,6 @@ uint64_t ThreadPool::nodes_searched() const { return accumulate(&Search::Worker:
 void ThreadPool::set(const NumaConfig&                           numaConfig,
                      Search::SharedState                         sharedState,
                      const Search::SearchManager::UpdateContext& updateContext) {
-
-    options = &sharedState.options;
 
     if (threads.size() > 0)  // destroy any existing thread(s)
     {
@@ -256,27 +245,18 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
 
     Search::RootMoves rootMoves;
     const auto        legalmoves = MoveList<LEGAL>(pos);
-    const ChasingRule rule       = chasing_rule(*options);
-    const bool        skyrule    = rule == CHASING_RULE_SKYRULE_JIEQI;
 
     for (const auto& uciMove : limits.searchmoves)
     {
         auto move = UCIEngine::to_move(pos, uciMove);
 
-        if (std::find(legalmoves.begin(), legalmoves.end(), move) != legalmoves.end()
-            && (!skyrule || pos.move_dark(move) || pos.capture(move)
-                || !pos.forbidden_by_skyrule_jieqi(move)))
+        if (std::find(legalmoves.begin(), legalmoves.end(), move) != legalmoves.end())
             rootMoves.emplace_back(move);
     }
 
-    if (rootMoves.empty() && !skyrule)
+    if (rootMoves.empty())
         for (const auto& m : legalmoves)
             rootMoves.emplace_back(m);
-    else if (rootMoves.empty() && limits.searchmoves.empty())
-        for (const auto& m : legalmoves)
-            if (!skyrule || pos.move_dark(m) || pos.capture(m)
-                || !pos.forbidden_by_skyrule_jieqi(m))
-                rootMoves.emplace_back(m);
 
     // After ownership transfer 'states' becomes empty, so if we stop the search
     // and call 'go' again without setting a new position states.get() == nullptr.

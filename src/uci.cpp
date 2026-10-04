@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <exception>
 #include <functional>
 #include <iterator>
 #include <optional>
@@ -91,22 +90,6 @@ void UCIEngine::loop() {
     for (int i = 1; i < cli.argc; ++i)
         cmd += std::string(cli.argv[i]) + " ";
 
-    const auto run_network_command = [this](auto&& command, bool finishGo = false) {
-        try
-        {
-            command();
-        }
-        catch (const std::exception& error)
-        {
-            // Benchmarks install callbacks that capture local variables.
-            // Restore the normal listeners before returning to the UCI loop.
-            init_search_update_listeners();
-            print_info_string(std::string("command failed: ") + error.what());
-            if (finishGo)
-                on_bestmove("0000", "");
-        }
-    };
-
     do
     {
         if (cli.argc == 1
@@ -143,7 +126,7 @@ void UCIEngine::loop() {
             // send info strings after the go command is sent for old GUIs and python-chess
             print_info_string(engine.numa_config_information_as_string());
             print_info_string(engine.thread_allocation_information_as_string());
-            run_network_command([&] { go(is); }, true);
+            go(is);
         }
         else if (token == "position")
             position(is);
@@ -157,21 +140,23 @@ void UCIEngine::loop() {
         else if (token == "flip")
             engine.flip();
         else if (token == "bench")
-            run_network_command([&] { bench(is); });
+            bench(is);
         else if (token == BenchmarkCommand)
-            run_network_command([&] { benchmark(is); });
+            benchmark(is);
         else if (token == "d")
             sync_cout << engine.visualize() << sync_endl;
         else if (token == "eval")
-            run_network_command([&] { engine.trace_eval(); });
+            engine.trace_eval();
         else if (token == "compiler")
             sync_cout << compiler_info() << sync_endl;
         else if (token == "--help" || token == "help" || token == "--license" || token == "license")
             sync_cout
-              << "\nAB-JChess is a jieqi engine for playing and analysis."
-                 "\nIt is free software released under the GNU GPLv3 license."
-                 "\nIt communicates through the Universal Chess Interface (UCI) protocol."
-                 "\nSee the packaged documentation for engine and license information.\n"
+              << "\nPikafish is a powerful xiangqi engine for playing and analyzing."
+                 "\nIt is released as free software licensed under the GNU GPLv3 License."
+                 "\nPikafish is normally used with a graphical user interface (GUI) and implements"
+                 "\nthe Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc."
+                 "\nFor any further information, visit https://github.com/official-pikafish/Pikafish#readme"
+                 "\nor read the corresponding README.md and Copying.txt files distributed along with this program.\n"
               << sync_endl;
         else if (!token.empty() && token[0] != '#')
             sync_cout << "Unknown command: '" << cmd << "'. Type help for more information."
@@ -308,10 +293,10 @@ void UCIEngine::benchmark(std::istream& args) {
 
     engine.set_on_update_full([&](const Engine::InfoFull& i) { nodesSearched = i.nodes; });
 
-    engine.set_on_iter([](const auto&) { });
-    engine.set_on_update_no_moves([](const auto&) { });
-    engine.set_on_bestmove([](const auto&, const auto&) { });
-    engine.set_on_verify_networks([](const auto&) { });
+    engine.set_on_iter([](const auto&) {});
+    engine.set_on_update_no_moves([](const auto&) {});
+    engine.set_on_bestmove([](const auto&, const auto&) {});
+    engine.set_on_verify_networks([](const auto&) {});
 
     Benchmark::BenchmarkSetup setup = Benchmark::setup_benchmark(args);
 
@@ -494,9 +479,7 @@ void UCIEngine::position(std::istringstream& is) {
         moves.push_back(token);
     }
 
-    try
-    { engine.set_position(fen, moves); } catch (const std::exception& error)
-    { sync_cout << "info string invalid position: " << error.what() << sync_endl; }
+    engine.set_position(fen, moves);
 }
 
 namespace {
@@ -509,27 +492,27 @@ struct WinRateParams {
 inline WinRateParams win_rate_params(const Position& pos) {
     const int ply = pos.game_ply();
     if (ply <= 9)
-        return {0.00064066, -0.05207866};
+        return { 0.00064066, -0.05207866 };
     else if (ply <= 19)
-        return {0.00091732, -0.07495616};
+        return { 0.00091732, -0.07495616 };
     else if (ply <= 29)
-        return {0.00125966, -0.09838683};
+        return { 0.00125966, -0.09838683 };
     else if (ply <= 39)
-        return {0.00162431, -0.13737944};
+        return { 0.00162431, -0.13737944 };
     else if (ply <= 49)
-        return {0.00196824, -0.19680290};
+        return { 0.00196824, -0.19680290 };
     else if (ply <= 59)
-        return {0.00235683, -0.29232929};
+        return { 0.00235683, -0.29232929 };
     else if (ply <= 69)
-        return {0.00277996, -0.42024359};
+        return { 0.00277996, -0.42024359 };
     else if (ply <= 79)
-        return {0.00324104, -0.58686233};
+        return { 0.00324104, -0.58686233 };
     else if (ply <= 100)
-        return {0.00394702, -0.90882361};
+        return { 0.00394702, -0.90882361 };
     else if (ply <= 120)
-        return {0.00426714, -1.24856114};
+        return { 0.00426714, -1.24856114 };
     else
-        return {0.00353587, -1.81372732};
+        return { 0.00353587, -1.81372732 };
 }
 
 // The win rate model is 1 / (1 + exp((a - eval) / b)), where a = p_a(material) and b = p_b(material).
@@ -564,15 +547,12 @@ std::string UCIEngine::format_score(const Score& s) {
 // without treatment of mate and similar special scores.
 int UCIEngine::to_cp(Value v, const Position& pos) {
 
-    long double           wdl_w         = win_rate_model_double(v, pos);
-    long double           wdl_l         = win_rate_model_double(-v, pos);
-    long double           win_loss_rate = wdl_w - wdl_l;
-    constexpr long double mate          = double(VALUE_MATE_IN_MAX_PLY - 1) / 400;
+    long double wdl_w = win_rate_model_double( v, pos);
+    long double wdl_l = win_rate_model_double(-v, pos);
+    long double win_loss_rate = wdl_w - wdl_l;
+    constexpr long double mate = double(VALUE_MATE_IN_MAX_PLY - 1) / 400;
 
-    return std::clamp(
-      int(400 * std::clamp(std::log10((1 + win_loss_rate) / (1 - win_loss_rate)), -mate, mate)
-          + 0.5),
-      -9999, 9999);
+    return std::clamp(int(400 * std::clamp(std::log10((1 + win_loss_rate) / (1 - win_loss_rate)), -mate, mate) + 0.5), -9999, 9999);
 }
 
 std::string UCIEngine::wdl(Value v, const Position& pos) {
@@ -606,11 +586,8 @@ std::string UCIEngine::move(Move m) {
 }
 
 Move UCIEngine::to_move(const Position& pos, std::string str) {
-    if (str.size() != 4)
-        return Move::none();
-
     for (const auto& m : MoveList<LEGAL>(pos))
-        if (str == move(m))
+        if (str.substr(0, 4) == move(m))
             return m;
 
     return Move::none();

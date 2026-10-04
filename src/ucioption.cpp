@@ -123,8 +123,8 @@ Option::Option(const char* v, const char* cur, OnChange f) :
     min(0),
     max(0),
     on_change(std::move(f)) {
-    defaultValue = currentValue = cur;
-    comboValues                = v;
+    defaultValue = v;
+    currentValue = cur;
 }
 
 Option::operator int() const {
@@ -161,11 +161,10 @@ Option& Option::operator=(const std::string& v) {
     {
         OptionsMap         comboMap;  // To have case insensitive compare
         std::string        token;
-        std::istringstream ss(comboValues);
+        std::istringstream ss(defaultValue);
         while (ss >> token)
-            if (token != "var")
-                comboMap.add(token, Option());
-        if (!comboMap.count(v))
+            comboMap.add(token, Option());
+        if (!comboMap.count(v) || v == "var")
             return *this;
     }
 
@@ -191,19 +190,8 @@ std::ostream& operator<<(std::ostream& os, const OptionsMap& om) {
                 const Option& o = it.second;
                 os << "\noption name " << it.first << " type " << o.type;
 
-                if (o.type == "string" || o.type == "check")
+                if (o.type == "string" || o.type == "check" || o.type == "combo")
                     os << " default " << o.defaultValue;
-
-                if (o.type == "combo")
-                {
-                    os << " default " << o.defaultValue;
-
-                    std::string        token;
-                    std::istringstream ss(o.comboValues);
-                    while (ss >> token)
-                        if (token != "var")
-                            os << " var " << token;
-                }
 
                 if (o.type == "spin")
                     os << " default " << int(stof(o.defaultValue)) << " min " << o.min << " max "
