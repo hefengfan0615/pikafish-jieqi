@@ -15,3 +15,13 @@ src/-lstdc++.res
 # Neural network for the NNUE evaluation
 **/*.nnue
 
+# jieqibox (Tauri GUI) build artifacts
+jieqibox/node_modules/
+jieqibox/dist/
+jieqibox/src-tauri/target/
+jieqibox/src-tauri/gen/android/.gradle/
+jieqibox/src-tauri/gen/android/app/build/
+jieqibox/src-tauri/gen/android/local.properties
+jieqibox/src-tauri/engine-assets/pikafish
+jieqibox/src-tauri/gen/android/app/src/main/assets/nnue/
+

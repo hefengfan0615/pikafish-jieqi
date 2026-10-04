@@ -1,0 +1,238 @@
+# pikafish-jieqi engine + JieqiBox GUI: build an Android APK with the engine
+# and its NNUE network bundled inside, so end users install one APK and the
+# engine loads automatically (no manual engine selection/download).
+#
+# Output:  app-universal-release-no-yolo.apk  ->  GitHub Release "丰帆揭棋"
+name: build-jieqibox-apk-bundled
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: jieqibox-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: r27c
+  NDK_DIR: android-ndk-r27c
+  NDK_BIN: /usr/local/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin
+  NNUE_URL: https://github.com/hefengfan0615/pikafish-jieqi/releases/download/v0.1/abjchess-20260911.nnue
+  NNUE_FILE: abjchess-20260911.nnue
+  BUNDLED_ENGINE_DIR: jieqibox/src-tauri/engine-assets
+  BUNDLED_ENGINE_NAME: pikafish
+  RELEASE_TAG: v0.7.2-fengfan
+  RELEASE_NAME: 丰帆揭棋
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download NNUE weights
+        run: |
+          set -e
+          curl -fL --retry 3 --retry-delay 5 -o "src/$NNUE_FILE" "$NNUE_URL"
+          ls -la "src/$NNUE_FILE"
+          magic="$(head -c 12 "src/$NNUE_FILE")"
+          echo "NNUE magic: $magic"
+          [ "$magic" = "ABJCHESSV82" ] || { echo "Unexpected NNUE magic" >&2; exit 1; }
+
+      - name: Install Android NDK (${{ env.NDK_VERSION }})
+        run: |
+          set -e
+          curl -fL --retry 3 -o ndk.zip "https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-linux.zip"
+          sudo unzip -q ndk.zip -d /usr/local/
+          "$NDK_BIN/llvm-strip" --version | head -1
+
+      - name: Compile jieqi Android engine (ARMv8)
+        run: |
+          set -e
+          export PATH="$NDK_BIN:$PATH"
+          cd src
+          make objclean
+          make -j2 build ARCH=armv8 COMP=ndk
+          cd ..
+          file src/pikafish
+
+      - name: Place engine + NNUE into the APK
+        run: |
+          set -e
+          # 1) ENGINE -> embedded in the Rust lib via include_bytes! (small; the
+          # per-ABI duplication in a universal APK is negligible).
+          mkdir -p "$BUNDLED_ENGINE_DIR"
+          cp src/pikafish "$BUNDLED_ENGINE_DIR/$BUNDLED_ENGINE_NAME"
+          chmod 755 "$BUNDLED_ENGINE_DIR/$BUNDLED_ENGINE_NAME"
+
+          # 2) NNUE -> a single Android raw asset. Do NOT embed it via
+          # include_bytes!: a universal APK carries 4 ABI variants of the Rust
+          # JNI lib, so embedding the ~130MB network would stamp 4 copies
+          # (~520MB). As one packaged asset it appears exactly once, and
+          # MainActivity copies it into the bundled engine dir at launch.
+          ANDROID_ASSETS="jieqibox/src-tauri/gen/android/app/src/main/assets"
+          mkdir -p "$ANDROID_ASSETS/nnue"
+          cp "src/$NNUE_FILE" "$ANDROID_ASSETS/nnue/$NNUE_FILE"
+
+          ls -la "$BUNDLED_ENGINE_DIR" "$ANDROID_ASSETS/nnue"
+          test -s "$BUNDLED_ENGINE_DIR/$BUNDLED_ENGINE_NAME"
+          test -s "$ANDROID_ASSETS/nnue/$NNUE_FILE"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare Android SDK (preinstalled on runner)
+        run: |
+          set -e
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME"   >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+          # The Tauri Android build compiles the Rust lib via the installed
+          # NDK. Reuse the NDK r27c already downloaded for the engine build.
+          echo "ANDROID_NDK_HOME=/usr/local/$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK_HOME=/usr/local/$NDK_DIR"         >> "$GITHUB_ENV"
+
+          # sdkmanager lives under a versioned cmdline-tools dir on hosted runners.
+          CMDTOOLS=$(ls -1 "$ANDROID_HOME/cmdline-tools" 2>/dev/null | head -n1)
+          SM="$ANDROID_HOME/cmdline-tools/$CMDTOOLS/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"; fi
+          echo "Using sdkmanager: $SM"
+          yes | "$SM" --licenses >/dev/null 2>&1 || true
+          # Useful components are usually preinstalled; this just ensures the
+          # required compileSdk platform + build-tools are present.
+          "$SM" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+
+          test -d "$ANDROID_HOME/platforms/android-34" || echo "WARN: android-34 platform not found"
+          NEWEST_BUILD_TOOLS=$(ls -1d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n1)
+          echo "BUILD_TOOLS_DIR=$NEWEST_BUILD_TOOLS" >> "$GITHUB_ENV"
+          echo "Build tools: $NEWEST_BUILD_TOOLS"
+
+      - name: Setup Rust (Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
+
+      - name: Prepare no-yolo frontend (remove YOLO/onnxruntime)
+        working-directory: jieqibox
+        run: |
+          set -euo pipefail
+          jq 'del(.dependencies."onnxruntime-web")' package.json > package.json.tmp && mv package.json.tmp package.json
+          rm -f src/composables/image-recognition/useImageRecognition.real.ts
+          mv src/composables/image-recognition/index.ts.stub src/composables/image-recognition/index.ts
+          # Remove onnxruntime static copy from vite.config.ts
+          sed -i.bak '/import.*vite-plugin-static-copy/d' vite.config.ts
+          sed -i.bak '/viteStaticCopy({/,/}),/d' vite.config.ts
+          # Use a fixed product name so the universal APK is identifiable.
+          jq '.productName = "jieqibox-no-yolo"' src-tauri/tauri.conf.json > t.jq && mv t.jq src-tauri/tauri.conf.json
+
+      - name: Install JS dependencies & build frontend
+        working-directory: jieqibox
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Tauri Android app (universal release, unsigned)
+        working-directory: jieqibox
+        run: |
+          npm install -g @tauri-apps/cli
+          npx tauri android build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_BUNDLE_IDENTIFIER_SUFFIX: '-no-yolo'
+
+      - name: Locate universal release APK
+        id: locate_apk
+        working-directory: jieqibox
+        run: |
+          set -e
+          # Tauri 2 does not sign the APK itself; the generated artifact is
+          # "*-unsigned.apk" and our own step signs it afterwards.
+          APK_PATH=$(find src-tauri/gen/android/app/build/outputs/apk -type f \
+            -name 'app-universal-release-unsigned.apk' | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No universal release APK produced. Listing outputs:"
+            find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk'
+            exit 1
+          fi
+          # Store an ABSOLUTE path so later steps (which run at repo root) can
+          # open the file regardless of their working directory.
+          APK_ABS="$GITHUB_WORKSPACE/jieqibox/$APK_PATH"
+          echo "UNIVERSAL_RELEASE_APK=$APK_ABS" >> "$GITHUB_ENV"
+          echo "Found APK: $APK_ABS"
+
+      - name: Auto-generate signing key & sign the APK
+        run: |
+          set -e
+          KEYSTORE_PATH="$RUNNER_TEMP/fengfan.jks"
+          SRAPASS="fengfan_release_2026"
+          # Generate a fresh debug-style keystore on the fly (no secrets/config).
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" \
+            -alias fengfan -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$SRAPASS" -keypass "$SRAPASS" \
+            -dname "CN=FengFan Jieqi, OU=Release, O=pikafish-jieqi, L=Guangzhou, C=CN"
+
+          SIGNED_APK="$RUNNER_TEMP/$RELEASE_NAME.apk"
+          apksigner() { "$BUILD_TOOLS_DIR/apksigner" "$@"; }
+          apksigner sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias fengfan \
+            --ks-pass "pass:$SRAPASS" \
+            --key-pass "pass:$SRAPASS" \
+            --out "$SIGNED_APK" \
+            "$UNIVERSAL_RELEASE_APK"
+
+          apksigner verify "$SIGNED_APK"
+          echo "APK signed and verified successfully."
+          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_NAME }}-apk
+          path: ${{ env.SIGNED_APK }}
+          retention-days: 30
+
+      - name: Create release tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -f "$RELEASE_TAG" HEAD
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/$RELEASE_TAG" --force
+
+      - name: Publish Release (丰帆揭棋) with the signed APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body: |
+            ## 丰帆揭棋
+
+            内置揭棋引擎（pikafish-jieqi，AB-JChess V8.2 NNUE 评分）与权重，安装后无需额外加载引擎，直接对弈。
+
+            - 引擎：pikafish-jieqi（arm64-v8a，AB-JChess V8.2 神经网络评分）
+            - 权重：abjchess-20260911.nnue
+            - 基于 JieqiBox 构建，去除 YOLO 图像识别模块
+            - APK 已自动签名，可直接安装
+          files: ${{ env.SIGNED_APK }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

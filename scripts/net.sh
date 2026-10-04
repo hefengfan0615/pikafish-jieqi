@@ -5,7 +5,7 @@ wget_or_curl=$( (command -v wget > /dev/null 2>&1 && echo "wget -qO-") || \
 
 
 fetch_network() {
-  _filename="pikafish.nnue"
+  _filename="abjchess-20260911.nnue"
 
   if [ -f "$_filename" ]; then
     echo "Exists $_filename, skipping download"
@@ -18,7 +18,7 @@ fetch_network() {
     exit 1
   fi
 
-  url="https://github.com/official-pikafish/Networks/releases/download/master-net/$_filename"
+  url="https://github.com/hefengfan0615/pikafish-jieqi/releases/download/v0.1/$_filename"
     echo "Downloading from $url ..."
     if $wget_or_curl "$url" > "$_filename"; then
       echo "Successfully downloaded $_filename"
