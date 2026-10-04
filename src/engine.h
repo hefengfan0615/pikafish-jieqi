@@ -28,7 +28,7 @@
 #include <utility>
 #include <vector>
 
-#include "nnue/network.h"
+#include "abjnnue/abjnnue_network.h"
 #include "numa.h"
 #include "position.h"
 #include "search.h"
@@ -82,14 +82,13 @@ class Engine {
 
     // network related
 
-    void verify_networks() const;
+    void verify_networks();
     void load_networks();
     void load_big_network(const std::string& file);
-    void save_network(const std::pair<std::optional<std::string>, std::string> files);
 
     // utility functions
 
-    void trace_eval() const;
+    void trace_eval();
 
     const OptionsMap& get_options() const;
     OptionsMap&       get_options();

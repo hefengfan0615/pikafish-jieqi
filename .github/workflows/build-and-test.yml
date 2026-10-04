@@ -1,0 +1,35 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build engine and run go movetime 5000
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download NNUE from release
+        run: |
+          curl -L -o src/abjchess-20260911.nnue \
+            https://github.com/hefengfan0615/pikafish-jieqi/releases/download/v0.1/abjchess-20260911.nnue
+          ls -la src/abjchess-20260911.nnue
+
+      - name: Build engine
+        working-directory: src
+        run: |
+          make -j build EXE=pikafish
+          make strip EXE=pikafish
+
+      - name: Run engine test (go movetime 5000)
+        working-directory: src
+        run: |
+          echo "===== Engine full output ====="
+          printf 'uci\nisready\nposition startpos\ngo movetime 5000\nquit\n' | ./pikafish
+          echo "===== End of output ====="

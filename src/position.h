@@ -19,17 +19,18 @@
 #ifndef POSITION_H_INCLUDED
 #define POSITION_H_INCLUDED
 
-#include <stdint.h>
+#include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <iosfwd>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "bitboard.h"
-#include "nnue/features/half_ka_v2_hm.h"
 #include "types.h"
 
 namespace Stockfish {
@@ -57,10 +58,17 @@ struct StateInfo {
     Bitboard   blockersForKing[COLOR_NB];
     Bitboard   pinners[COLOR_NB];
     Bitboard   checkSquares[PIECE_TYPE_NB];
+    Bitboard      skyruleRawChased;
+    Bitboard      skyruleChased;
+    SkyruleAction skyruleAction;
+    int           skyruleCount;
     bool       needSlowCheck;
     Piece      capturedPiece;
     Move       move;
     bool       captureDark;
+    bool       movedDark;
+    int        movedId;
+    int        capturedId;
 };
 
 
@@ -76,6 +84,9 @@ using StateListPtr = std::unique_ptr<std::deque<StateInfo>>;
 // traversing the search tree.
 class Position {
    public:
+    static constexpr int MaxRestPieceTypes = 6;
+    using RestPieceList                    = std::array<std::pair<Piece, int>, MaxRestPieceTypes>;
+
     static void init();
 
     Position()                           = default;
@@ -86,6 +97,7 @@ class Position {
     Position&   set(const std::string& fenStr, StateInfo* si);
     Position&   set(const Position& pos, StateInfo* si);
     std::string fen() const;
+    void        swap(Position& other) noexcept;
 
     // Position representation
     Bitboard pieces() const;  // All pieces
@@ -151,7 +163,11 @@ class Position {
     // Other properties of the position
     Color    side_to_move() const;
     int      game_ply() const;
-    bool     rule_judge(Value& result, int ply = 0);
+    bool     rule_judge(Value& result, int ply = 0, ChasingRule rule = CHASING_RULE_GITHUB);
+    bool     forbidden_by_skyrule_jieqi(Move m) const;
+    Bitboard skyrule_chased(Bitboard* rooted = nullptr, Bitboard* pinnedRoot = nullptr,
+                            Bitboard* withdrawnScreen = nullptr) const;
+    bool     skyrule_repeat_draw() const;
     int      rule40_count() const;
     uint16_t chased(Color c);
     Value    major_material(Color c) const;
@@ -159,7 +175,10 @@ class Position {
 
     const int&                         rest_piece(Piece pc) const;
     int&                               rest_piece(Piece pc);
+    int                                rest_pieces(Color c, RestPieceList& pieces) const;
     std::vector<std::pair<Piece, int>> rest_pieces(Color c) const;
+    void                               remove_rest_piece(Piece pc);
+    void                               restore_rest_piece(Piece pc);
 
     // Position consistency check, for debugging
     bool pos_is_ok() const;
@@ -170,10 +189,16 @@ class Position {
     void put_piece(Piece pc, Square s);
     void remove_piece(Square s);
 
+    // Make an independent snapshot suitable for SkyRule rollback analysis.
+    // This copies the board and a bounded prefix of the StateInfo history while
+    // relinking all previous pointers into the destination storage.
+    void copy_for_chasing_from(const Position& src);
+
    private:
     // Initialization helpers (used while setting up a position)
     void set_state() const;
     void set_check_info() const;
+    void set_skyrule_info(StateInfo* si) const;
 
     // Other helpers
     void                  move_piece(Square from, Square to);
@@ -181,6 +206,12 @@ class Position {
     void                  undo_move(Move m, Piece captured, int id = 0);
     Value                 detect_chases(int d, int ply = 0);
     bool                  chase_legal(Move m) const;
+    bool                  skyrule_move_chases(Square attacker, Square target) const;
+    int  skyrule_continuous_chase_count_in_place(Square attacker, Square target, int limit);
+    bool     skyrule_move_forbidden(Move m) const;
+    void do_quiet_move_for_chasing(Move m, StateInfo& newSt);
+    void skyrule_assign_piece_ids();
+    int  skyrule_repeat_count(int end) const;
 
     template<bool AfterMove>
     Key adjust_key40(Key k) const;
@@ -201,6 +232,13 @@ class Position {
 
     // Board for chasing detection
     int idBoard[SQUARE_NB];
+
+    // Storage used by temporary SkyRule rollback positions.  A raw embedded
+    // array keeps these copies independent of the caller's StateInfo chain;
+    // copying a Position object byte-for-byte would otherwise leave st (and
+    // previous links) pointing at transient stack or thread storage.
+    StateInfo chasingStateStorage[128];
+    int chasingStateCount = 0;
 };
 
 std::ostream& operator<<(std::ostream& os, const Position& pos);
@@ -295,15 +333,25 @@ inline const int& Position::rest_piece(Piece pc) const { return restPieces[pc]; 
 
 inline int& Position::rest_piece(Piece pc) { return restPieces[pc]; }
 
-inline std::vector<std::pair<Piece, int>> Position::rest_pieces(Color c) const {
-    std::vector<std::pair<Piece, int>> pieces;
+inline int Position::rest_pieces(Color c, RestPieceList& pieces) const {
+    int             count        = 0;
     const PieceType pieceOrder[] = {ROOK, CANNON, KNIGHT, ADVISOR, BISHOP, PAWN};
     for (PieceType pt : pieceOrder)
     {
         Piece pc = make_piece(c, pt);
         if (restPieces[pc])
-            pieces.emplace_back(pc, restPieces[pc]);
+            pieces[count++] = {pc, restPieces[pc]};
     }
+    return count;
+}
+
+inline std::vector<std::pair<Piece, int>> Position::rest_pieces(Color c) const {
+    std::vector<std::pair<Piece, int>> pieces;
+    RestPieceList                      stackPieces;
+    int                                count = rest_pieces(c, stackPieces);
+    pieces.reserve(count);
+    for (int i = 0; i < count; ++i)
+        pieces.emplace_back(stackPieces[i]);
     return pieces;
 }
 
@@ -321,7 +369,6 @@ inline Piece Position::captured_piece() const { return st->capturedPiece; }
 inline bool Position::move_dark(Move m) const { return pieces(DARK) & m.from_sq(); }
 
 inline void Position::put_piece(Piece pc, Square s) {
-
     board[s] = pc;
     byTypeBB[ALL_PIECES] |= byTypeBB[type_of(pc)] |= s;
     byColorBB[color_of(pc)] |= s;
@@ -332,6 +379,7 @@ inline void Position::put_piece(Piece pc, Square s) {
 inline void Position::remove_piece(Square s) {
 
     Piece pc = board[s];
+
     byTypeBB[ALL_PIECES] ^= s;
     byTypeBB[type_of(pc)] ^= s;
     byColorBB[color_of(pc)] ^= s;
@@ -344,6 +392,7 @@ inline void Position::move_piece(Square from, Square to) {
 
     Piece    pc     = board[from];
     Bitboard fromTo = from | to;
+
     byTypeBB[ALL_PIECES] ^= fromTo;
     byTypeBB[type_of(pc)] ^= fromTo;
     byColorBB[color_of(pc)] ^= fromTo;
@@ -365,6 +414,7 @@ inline Position& Position::set(const Position& pos, StateInfo* si) {
 
     // Special cares for bloom filter
     std::memcpy(&filter, &pos.filter, sizeof(BloomFilter));
+    std::memcpy(idBoard, pos.idBoard, sizeof(idBoard));
 
     return *this;
 }

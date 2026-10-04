@@ -1,12 +1,12 @@
-# Pikafish, a UCI chess playing engine derived from Stockfish
-# Copyright (C) 2004-2023 The Pikafish developers (see AUTHORS file)
+# AB-JChess, a UCI jieqi engine
+# Copyright (C) 2026 AB-JChess contributors
 #
-# Pikafish is free software: you can redistribute it and/or modify
+# AB-JChess is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# Pikafish is distributed in the hope that it will be useful,
+# AB-JChess is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
@@ -39,9 +39,9 @@ endif
 
 ### Executable name
 ifeq ($(target_windows),yes)
-	EXE = pikafish.exe
+	EXE = AB-JChess.exe
 else
-	EXE = pikafish
+	EXE = AB-JChess
 endif
 
 ### Installation dir definitions
@@ -52,11 +52,25 @@ BINDIR = $(PREFIX)/bin
 PGOBENCH = printf "speedtest\nbench\n" | $(WINE_PATH) ./$(EXE)
 
 ### Source and object files
-SRCS = $(shell find . -name '*.cpp') $(shell find . -name '*.S')
+SRCS = $(shell find . -name "*.cpp") \
+	$(shell find . -name "*.S")
 
-HEADERS = $(shell find . -name '*.h')
+HEADERS = $(shell find . -name "*.h")
 
 OBJS = $(notdir $(patsubst %.cpp,%.o,$(patsubst %.S,%.o,$(SRCS))))
+
+ABJNNUE_SHA256_TEST_EXE = ../tests/abjnnue_sha256_test.exe
+ABJNNUE_SHA256_TEST_OBJ = abjnnue_sha256_test.o
+POSITION_PROTOCOL_TEST_EXE = ../tests/position_protocol_test.exe
+POSITION_PROTOCOL_TEST_OBJ = position_protocol_test.o
+SKYRULE_JIEQI_TEST_EXE = ../tests/skyrule_jieqi_test.exe
+SKYRULE_JIEQI_TEST_OBJ = skyrule_jieqi_test.o
+SKYRULE_JIEQI_STRUCTURE_TEST = ../tests/skyrule_jieqi_structure.ps1
+NNUE_FILE ?= abjchess-20260911.nnue
+POWERSHELL ?= powershell
+ABJNNUE_ENGINE_OBJS = $(filter-out main.o,$(OBJS))
+# Test and engine objects share the active flags. As with the regular build,
+# run objclean before switching debug/sanitize/ARCH/COMP.
 
 VPATH = $(shell find . -type d | tr '\n' ':')
 
@@ -429,7 +443,41 @@ ifeq ($(MAKELEVEL),0)
        export ENV_LDFLAGS := $(LDFLAGS)
 endif
 
-CXXFLAGS = $(ENV_CXXFLAGS) -Wall -Wcast-qual -fno-exceptions -std=c++17 $(EXTRACXXFLAGS)
+CXXFLAGS = $(ENV_CXXFLAGS) -Wall -Wcast-qual -std=c++17 $(EXTRACXXFLAGS)
+
+# Enable the NNUE ABI used by this engine.
+CXXFLAGS += -DABJCHESS_V8
+ABJNNUE_RUNTIME_STATS ?= no
+ifeq ($(ABJNNUE_RUNTIME_STATS),yes)
+    CXXFLAGS += -DABJNNUE_RUNTIME_STATS
+endif
+
+# Enable the worker-local accumulator refresh cache by default.
+ABJNNUE_RUNTIME_REFRESH_CACHE ?= yes
+ifeq ($(ABJNNUE_RUNTIME_REFRESH_CACHE),yes)
+    CXXFLAGS += -DABJNNUE_RUNTIME_REFRESH_CACHE
+endif
+
+# Fused accumulator rows and the ABJNNUE-specific SIMD transform are retained
+# only as explicitly labelled diagnostic/reference builds. Requiring the
+# research switch prevents either path from being mistaken for the candidate
+# runtime configuration.
+ABJNNUE_RUNTIME_RESEARCH ?= no
+ABJNNUE_RUNTIME_FUSED ?= no
+ifeq ($(ABJNNUE_RUNTIME_FUSED),yes)
+ifneq ($(ABJNNUE_RUNTIME_RESEARCH),yes)
+    $(error ABJNNUE_RUNTIME_FUSED=yes is diagnostic-only; set ABJNNUE_RUNTIME_RESEARCH=yes explicitly)
+endif
+    CXXFLAGS += -DABJNNUE_RUNTIME_FUSED_UPDATE
+endif
+
+ABJNNUE_RUNTIME_SIMD ?= no
+ifeq ($(ABJNNUE_RUNTIME_SIMD),yes)
+ifneq ($(ABJNNUE_RUNTIME_RESEARCH),yes)
+    $(error ABJNNUE_RUNTIME_SIMD=yes is reference-only; set ABJNNUE_RUNTIME_RESEARCH=yes explicitly)
+endif
+    CXXFLAGS += -DABJNNUE_RUNTIME_SIMD_TRANSFORM
+endif
 
 DEPENDFLAGS = $(ENV_DEPENDFLAGS) -std=c++17
 LDFLAGS = $(ENV_LDFLAGS) $(EXTRALDFLAGS)
@@ -501,7 +549,9 @@ ifeq ($(COMP),clang)
 	comp=clang
 	CXX=clang++
 	ifeq ($(target_windows),yes)
-		CXX=x86_64-w64-mingw32-clang++
+		ifneq ($(shell command -v x86_64-w64-mingw32-clang++ 2>/dev/null),)
+			CXX=x86_64-w64-mingw32-clang++
+		endif
 	endif
 
 	CXXFLAGS += -pedantic -Wextra -Wshadow -Wmissing-prototypes \
@@ -662,8 +712,8 @@ ifeq ($(optimize),yes)
 	endif
 
 	ifeq ($(comp),clang)
-		clangmajorversion := $(shell $(CXX) -dumpversion 2>/dev/null | cut -f1 -d.)
-		ifeq ($(shell expr $(clangmajorversion) \< 16),1)
+		clangmajorversion := $(shell $(CXX) -dumpfullversion -dumpversion 2>/dev/null | sed 's/[^0-9.].*//' | cut -f1 -d.)
+		ifeq ($(shell test -n "$(clangmajorversion)" && expr $(clangmajorversion) \< 16),1)
 			CXXFLAGS += -fexperimental-new-pass-manager
 		endif
 	endif
@@ -875,7 +925,7 @@ endif
 
 help:
 	@echo "" && \
-	echo "To compile pikafish, type: " && \
+	echo "To compile AB-JChess, type: " && \
 	echo "" && \
 	echo "make -j target [ARCH=arch] [COMP=compiler] [COMPCXX=cxx]" && \
 	echo "" && \
@@ -884,7 +934,11 @@ help:
 	echo "help                    > Display architecture details" && \
 	echo "profile-build           > standard build with profile-guided optimization" && \
 	echo "build                   > skip profile-guided optimization" && \
-	echo "net                     > Download the default nnue nets" && \
+	echo "net                     > Verify NNUE_FILE is present" && \
+	echo "abjnnue-test            > Run independent engine regression tests" && \
+	echo "position-protocol-test  > Run FEN and protocol tests" && \
+	echo "skyrule-jieqi-test     > Run Duffish SkyRule Jieqi tests" && \
+	echo "abjnnue-sha256-test     > Run SHA-256 known-vector tests" && \
 	echo "strip                   > Strip executable" && \
 	echo "install                 > Install executable" && \
 	echo "clean                   > Clean up" && \
@@ -950,7 +1004,8 @@ ifneq ($(SUPPORTED_ARCH), true)
 endif
 
 
-.PHONY: help analyze build profile-build strip install clean net \
+.PHONY: help analyze build profile-build strip install clean net abjnnue-test \
+	abjnnue-sha256-test position-protocol-test skyrule-jieqi-test \
 	objclean profileclean config-sanity \
 	config-sanity \
 	icx-profile-use icx-profile-make \
@@ -958,13 +1013,25 @@ endif
 	clang-profile-use clang-profile-make FORCE \
 	format analyze
 
-analyze: net config-sanity objclean
-	$(MAKE) -k ARCH=$(ARCH) COMP=$(COMP) $(notdir $(patsubst %.cpp,%.o,$(filter-out ./external/%,$(filter %.cpp,$(SRCS)))))
+analyze: config-sanity objclean
+	$(MAKE) -k ARCH=$(ARCH) COMP=$(COMP) $(notdir $(patsubst %.cpp,%.o,$(filter %.cpp,$(SRCS))))
 
-build: net config-sanity
+build: config-sanity
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) all
 
-profile-build: net config-sanity objclean profileclean
+abjnnue-test: abjnnue-sha256-test position-protocol-test skyrule-jieqi-test
+
+abjnnue-sha256-test: config-sanity $(ABJNNUE_SHA256_TEST_EXE)
+	$(ABJNNUE_SHA256_TEST_EXE)
+
+position-protocol-test: config-sanity $(POSITION_PROTOCOL_TEST_EXE)
+	$(POSITION_PROTOCOL_TEST_EXE)
+
+skyrule-jieqi-test: config-sanity $(SKYRULE_JIEQI_TEST_EXE)
+	$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File $(SKYRULE_JIEQI_STRUCTURE_TEST)
+	$(SKYRULE_JIEQI_TEST_EXE)
+
+profile-build: config-sanity objclean profileclean
 	@echo ""
 	@echo "Step 1/4. Building instrumented executable ..."
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) $(profile_make)
@@ -994,21 +1061,24 @@ clean: objclean profileclean
 
 # clean binaries and objects
 objclean:
-	@rm -f pikafish pikafish.exe $(shell find . -name '*.o')
+	@rm -f AB-JChess AB-JChess.exe $(shell find . -name "*.o") \
+		$(ABJNNUE_SHA256_TEST_OBJ) $(ABJNNUE_SHA256_TEST_EXE) \
+		$(POSITION_PROTOCOL_TEST_OBJ) $(POSITION_PROTOCOL_TEST_EXE) \
+		$(SKYRULE_JIEQI_TEST_OBJ) $(SKYRULE_JIEQI_TEST_EXE)
 
 # clean auxiliary profiling files
 profileclean:
 	@rm -rf profdir
-	@rm -f bench.txt $(shell find . -name '*.gcda' -o -name '*.gcno') *.s PGOBENCH.out
-	@rm -f pikafish.profdata *.profraw
-	@rm -f pikafish.*args*
-	@rm -f pikafish.*lt*
-	@rm -f pikafish.res
+	@rm -f bench.txt $(shell find . -name "*.gcda" -o -name "*.gcno") *.s PGOBENCH.out
+	@rm -f AB-JChess.profdata *.profraw
+	@rm -f AB-JChess.*args*
+	@rm -f AB-JChess.*lt*
+	@rm -f AB-JChess.res
 	@rm -f ./-lstdc++.res
 
-# evaluation network (nnue)
+# Check the selected runtime package.
 net:
-	@$(SHELL) ../scripts/net.sh
+	@test -f "$(NNUE_FILE)" || (echo "NNUE_FILE=$(NNUE_FILE) is required" && exit 1)
 
 format:
 	$(CLANG-FORMAT) -i $(filter %.cpp,$(SRCS)) $(HEADERS) -style=file
@@ -1019,7 +1089,7 @@ format:
 
 all: $(EXE) .depend
 
-config-sanity: net
+config-sanity:
 	@echo "" && \
 	echo "Config:" && \
 	echo "debug: '$(debug)'" && \
@@ -1092,6 +1162,24 @@ config-sanity: net
 $(EXE): $(OBJS)
 	+$(CXX) -o $@ $(OBJS) $(LDFLAGS)
 
+$(ABJNNUE_SHA256_TEST_OBJ): ../tests/abjnnue_sha256_test.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -I. -c -o $@ $<
+
+$(ABJNNUE_SHA256_TEST_EXE): $(ABJNNUE_SHA256_TEST_OBJ) abjnnue_package.o
+	+$(CXX) -o $@ $(ABJNNUE_SHA256_TEST_OBJ) abjnnue_package.o $(LDFLAGS)
+
+$(POSITION_PROTOCOL_TEST_OBJ): ../tests/position_protocol_test.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -I. -c -o $@ $<
+
+$(POSITION_PROTOCOL_TEST_EXE): $(POSITION_PROTOCOL_TEST_OBJ) $(ABJNNUE_ENGINE_OBJS)
+	+$(CXX) -o $@ $(POSITION_PROTOCOL_TEST_OBJ) $(ABJNNUE_ENGINE_OBJS) $(LDFLAGS)
+
+$(SKYRULE_JIEQI_TEST_OBJ): ../tests/skyrule_jieqi_test.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -I. -c -o $@ $<
+
+$(SKYRULE_JIEQI_TEST_EXE): $(SKYRULE_JIEQI_TEST_OBJ) $(ABJNNUE_ENGINE_OBJS)
+	+$(CXX) -o $@ $(SKYRULE_JIEQI_TEST_OBJ) $(ABJNNUE_ENGINE_OBJS) $(LDFLAGS)
+
 %.o: %.S
 	$(CXX) $(CXXFLAGS)   -c -o $@ $<
 
@@ -1106,9 +1194,9 @@ clang-profile-make:
 	all
 
 clang-profile-use:
-	$(XCRUN) $(LLVM_PROFDATA) merge -output=pikafish.profdata *.profraw
+	$(XCRUN) $(LLVM_PROFDATA) merge -output=AB-JChess.profdata *.profraw
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-use=pikafish.profdata' \
+	EXTRACXXFLAGS='-fprofile-use=AB-JChess.profdata' \
 	EXTRALDFLAGS='-fprofile-use ' \
 	all
 
@@ -1146,3 +1234,4 @@ icx-profile-use:
 ifeq (, $(filter $(MAKECMDGOALS), help strip install clean net objclean profileclean format config-sanity))
 -include .depend
 endif
+

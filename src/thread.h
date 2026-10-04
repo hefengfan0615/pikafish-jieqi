@@ -36,6 +36,7 @@
 namespace Stockfish {
 
 using Value = int;
+class OptionsMap;
 
 // Sometimes we don't want to actually bind the threads, but the recipient still
 // needs to think it runs on *some* NUMA node, such that it can access structures
@@ -160,6 +161,7 @@ class ThreadPool {
     StateListPtr                         setupStates;
     std::vector<std::unique_ptr<Thread>> threads;
     std::vector<NumaIndex>               boundThreadToNumaNode;
+    const OptionsMap*                    options = nullptr;
 
     uint64_t accumulate(std::atomic<uint64_t> Search::Worker::* member) const {
 

@@ -60,12 +60,12 @@
 // Enforce minimum GCC version
     #if defined(__GNUC__) && !defined(__clang__) \
       && (__GNUC__ < 9 || (__GNUC__ == 9 && __GNUC_MINOR__ < 3))
-        #error "Pikafish requires GCC 9.3 or later for correct compilation"
+        #error "AB-JChess requires GCC 9.3 or later for correct compilation"
     #endif
 
     // Enforce minimum Clang version
     #if defined(__clang__) && (__clang_major__ < 10)
-        #error "Pikafish requires Clang 10.0 or later for correct compilation"
+        #error "AB-JChess requires Clang 10.0 or later for correct compilation"
     #endif
 
     #define ASSERT_ALIGNED(ptr, alignment) assert(reinterpret_cast<uintptr_t>(ptr) % alignment == 0)
@@ -130,6 +130,24 @@ enum Color : int8_t {
     WHITE,
     BLACK,
     COLOR_NB = 2
+};
+
+enum ChasingRule : int8_t {
+    CHASING_RULE_GITHUB,
+    CHASING_RULE_SKYRULE_JIEQI
+};
+
+// The per-move action recorded by the Duffish-style SkyRule state machine.
+// Keep the unprefixed names required by the V8 interface and provide the
+// prefixed aliases used by the upstream Duffish implementation.
+enum SkyruleAction : int8_t {
+    NONE,
+    CHECK,
+    CHASE,
+
+    SKYRULE_NONE  = NONE,
+    SKYRULE_CHECK = CHECK,
+    SKYRULE_CHASE = CHASE
 };
 
 enum Bound : int8_t {
@@ -289,8 +307,6 @@ struct DirtyPiece {
     // uninitialized
     Square remove_sq, add_sq;
     Piece  remove_pc, add_pc;
-
-    bool requires_refresh[2];
 };
 
     #define ENABLE_INCR_OPERATORS_ON(T) \

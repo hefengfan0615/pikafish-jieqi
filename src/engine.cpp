@@ -25,14 +25,15 @@
 #include <memory>
 #include <ostream>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "evaluate.h"
 #include "misc.h"
-#include "nnue/network.h"
-#include "nnue/nnue_common.h"
+#include "abjnnue/abjnnue_network.h"
 #include "numa.h"
 #include "perft.h"
 #include "position.h"
@@ -50,12 +51,84 @@ constexpr auto StartFEN =
 constexpr int MaxHashMB  = Is64Bit ? 33554432 : 2048;
 int           MaxThreads = std::max(1024, 4 * int(get_hardware_concurrency()));
 
+namespace {
+
+constexpr std::string_view PieceToChar(" RACPNBK racpnbkXx");
+
+struct ParsedHistoryMove {
+    Move                 move = Move::none();
+    std::optional<Piece> movedIdentity;
+    std::optional<Piece> capturedIdentity;
+};
+
+Piece parse_history_identity(const Position& position,
+                             char            token,
+                             Color           expectedColor,
+                             const char*     role) {
+    const std::size_t idx = PieceToChar.find(token);
+    if (idx == std::string_view::npos || idx == NO_PIECE || idx >= PIECE_NB)
+        throw std::invalid_argument(std::string("invalid ") + role + " identity suffix");
+
+    const Piece pc = Piece(idx);
+    if (type_of(pc) < ROOK || type_of(pc) > BISHOP)
+        throw std::invalid_argument(std::string("invalid ") + role + " identity suffix");
+    if (color_of(pc) != expectedColor)
+        throw std::invalid_argument(std::string("wrong color for ") + role + " identity suffix");
+    if (position.rest_piece(pc) <= 0)
+        throw std::invalid_argument(std::string(role) + " identity is absent from the pool");
+    return pc;
+}
+
+ParsedHistoryMove parse_history_move(const Position& position, const std::string& token) {
+    if (token.size() < 4 || token.size() > 6)
+        throw std::invalid_argument(
+          "history move must contain four coordinates and valid identities");
+
+    ParsedHistoryMove parsed;
+    parsed.move = UCIEngine::to_move(position, token.substr(0, 4));
+    if (parsed.move == Move::none())
+        throw std::invalid_argument("illegal or malformed move in position history");
+
+    const bool movedDark = position.move_dark(parsed.move);
+    const bool capturedDark =
+      position.capture(parsed.move) && position.is_dark(parsed.move.to_sq());
+    const Color mover = position.side_to_move();
+
+    const std::size_t minimumSize = 4 + std::size_t(movedDark);
+    const std::size_t maximumSize = minimumSize + std::size_t(capturedDark);
+    if (token.size() < minimumSize || token.size() > maximumSize)
+        throw std::invalid_argument("identity suffix does not match the hidden move/capture");
+
+    std::size_t suffix = 4;
+    if (movedDark)
+        parsed.movedIdentity =
+          parse_history_identity(position, token[suffix++], mover, "moved-dark");
+    if (capturedDark && suffix < token.size())
+        parsed.capturedIdentity =
+          parse_history_identity(position, token[suffix++], ~mover, "captured-dark");
+
+    return parsed;
+}
+
+void apply_history_move(Position&                position,
+                        std::deque<StateInfo>&   states,
+                        const ParsedHistoryMove& parsed) {
+    states.emplace_back();
+    position.do_move(parsed.move, states.back());
+    if (parsed.movedIdentity)
+        position.do_flip(parsed.move.to_sq(), *parsed.movedIdentity);
+    if (parsed.capturedIdentity)
+        position.remove_rest_piece(*parsed.capturedIdentity);
+}
+
+}  // namespace
+
 Engine::Engine(std::optional<std::string> path) :
     binaryDirectory(path ? CommandLine::get_binary_directory(*path) : ""),
     numaContext(NumaConfig::from_system()),
     states(new std::deque<StateInfo>(1)),
     threads(),
-    networks(numaContext, NN::Networks(NN::NetworkBig({EvalFileDefaultNameBig, "None", ""}))) {
+    networks(numaContext, NN::Networks(NN::NetworkBig())) {
     pos.set(StartFEN, &states->back());
 
 
@@ -96,25 +169,50 @@ Engine::Engine(std::optional<std::string> path) :
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
 
+    options.add(  //
+      "ChasingRule", Option("github skyrule_Jieqi", "skyrule_Jieqi", [this](const Option&) {
+          search_clear();
+          return std::nullopt;
+      }));
+
     options.add("Move Overhead", Option(10, 0, 5000));
+
+#if !defined(ABJCHESS_RELEASE)
+    options.add("AggressiveLevel", Option(3, 0, 10));
+
+    const Option::OnChange clearSearch = [this](const Option&) {
+        search_clear();
+        return std::nullopt;
+    };
+
+    options.add("RevealBonusBase", Option(0, -256, 256, clearSearch));
+    options.add("RevealBonusPhase", Option(0, -256, 256, clearSearch));
+    options.add("RevealBonusPool", Option(0, -256, 256, clearSearch));
+    options.add("RevealBonusUnknown", Option(0, -256, 256, clearSearch));
+    options.add("RevealBonusComeback", Option(0, -256, 256, clearSearch));
+    options.add("RevealMoveOrder", Option(0, -16384, 16384, clearSearch));
+    options.add("RevealReduction", Option(0, -2180, 2180, clearSearch));
+    options.add("RevealPruningMargin", Option(0, -512, 512, clearSearch));
+    options.add("RevealQuietBase", Option(-12, -96, 96, clearSearch));
+    options.add("RevealQuietPhase", Option(0, -96, 96, clearSearch));
+    options.add("RevealQuietSafety", Option(24, -192, 192, clearSearch));
+    options.add("RevealQuietHighValue", Option(-12, -96, 96, clearSearch));
+    options.add("RevealQuietDiversity", Option(0, -96, 96, clearSearch));
+    options.add("RevealQuietComeback", Option(0, -96, 96, clearSearch));
+    options.add("RevealQuietMoveOrder", Option(0, -2048, 2048, clearSearch));
+    options.add("RevealQuietReduction", Option(0, -545, 545, clearSearch));
+#endif
 
     options.add("nodestime", Option(0, 0, 10000));
 
     options.add("UCI_ShowWDL", Option(false));
 
-    options.add(  //
-      "EvalFile", Option(EvalFileDefaultNameBig, [this](const Option& o) {
-          load_big_network(o);
-          return std::nullopt;
-      }));
+    options.add("EvalFile", Option(NN::EvalFileDefaultNameBig));
 
-    load_networks();
     resize_threads();
 }
 
 std::uint64_t Engine::perft(const std::string& fen, Depth depth) {
-    verify_networks();
-
     return Benchmark::perft(fen, depth);
 }
 
@@ -156,34 +254,21 @@ void Engine::set_on_verify_networks(std::function<void(std::string_view)>&& f) {
 void Engine::wait_for_search_finished() { threads.main_thread()->wait_for_search_finished(); }
 
 void Engine::set_position(const std::string& fen, const std::vector<std::string>& moves) {
-    constexpr std::string_view PieceToChar(" RACPNBK racpnbkXx");
+    stop();
+    wait_for_search_finished();
 
-    // Drop the old state and create a new one
-    states = StateListPtr(new std::deque<StateInfo>(1));
-    pos.set(fen, &states->back());
+    auto     stagedStates = StateListPtr(new std::deque<StateInfo>(1));
+    Position stagedPosition;
+    stagedPosition.set(fen, &stagedStates->back());
 
-    for (const auto& move : moves)
+    for (const auto& token : moves)
     {
-        auto m = UCIEngine::to_move(pos, move);
-
-        if (m == Move::none())
-            break;
-
-        states->emplace_back();
-        pos.do_move(m, states->back());
-        if (move.length() == 5)
-        {
-            if (pos.is_dark(m.to_sq()))
-                pos.do_flip(m.to_sq(), Piece(PieceToChar.find(move[4])));
-            else
-                pos.rest_piece(Piece(PieceToChar.find(move[4])))--;
-        }
-        else if (move.length() == 6)
-        {
-            pos.do_flip(m.to_sq(), Piece(PieceToChar.find(move[4])));
-            pos.rest_piece(Piece(PieceToChar.find(move[5])))--;
-        }
+        const ParsedHistoryMove parsed = parse_history_move(stagedPosition, token);
+        apply_history_move(stagedPosition, *stagedStates, parsed);
     }
+
+    pos.swap(stagedPosition);
+    states.swap(stagedStates);
 }
 
 // modifiers
@@ -230,33 +315,75 @@ void Engine::set_ponderhit(bool b) { threads.main_manager()->ponder = b; }
 
 // network related
 
-void Engine::verify_networks() const {
+void Engine::verify_networks() {
+    if (std::string(options["EvalFile"]).empty())
+        throw std::runtime_error("ABJNNUE EvalFile is not set; send 'setoption name EvalFile value <path>' before searching");
+
+    // Protocol initialization and move generation do not require a network.
+    // Retry a missing default on each search, so installing it can recover
+    // the same running engine without an explicit EvalFile change.
+    if (networks->big.current_file() != std::string(options["EvalFile"]))
+    {
+        try
+        {
+            load_networks();
+        }
+        catch (const std::exception&)
+        {
+            if (!networks->big.current_file().empty())
+                options.options_map.at("EvalFile").currentValue = networks->big.current_file();
+            throw;
+        }
+    }
+
     networks->big.verify(options["EvalFile"], onVerifyNetworks);
 }
 
 void Engine::load_networks() {
-    networks.modify_and_replicate([this](NN::Networks& networks_) {
-        networks_.big.load(binaryDirectory, options["EvalFile"]);
-    });
+    if (std::string(options["EvalFile"]).empty())
+        return;
+
+    NN::NetworkBig loaded;
+    loaded.load(binaryDirectory, options["EvalFile"]);
+    networks.modify_and_replicate(
+      [&loaded](NN::Networks& networks_) { networks_.big = std::move(loaded); });
     threads.clear();
     threads.ensure_network_replicated();
 }
 
 void Engine::load_big_network(const std::string& file) {
-    networks.modify_and_replicate(
-      [this, &file](NN::Networks& networks_) { networks_.big.load(binaryDirectory, file); });
-    threads.clear();
-    threads.ensure_network_replicated();
-}
+    const std::string selectedFile = options["EvalFile"];
+    NN::NetworkBig loaded;
+    try
+    {
+        loaded.load(binaryDirectory, file);
+        const auto loadedFile = loaded.current_file();
 
-void Engine::save_network(const std::pair<std::optional<std::string>, std::string> files) {
-    networks.modify_and_replicate(
-      [&files](NN::Networks& networks_) { networks_.big.save(files.first); });
+        networks.modify_and_replicate(
+          [&loaded](NN::Networks& networks_) { networks_.big = std::move(loaded); });
+        threads.clear();
+        threads.ensure_network_replicated();
+
+        // Explicit API loads update the option as well as the live network.
+        options.options_map.at("EvalFile").currentValue = loadedFile;
+        return;
+    }
+    catch (const std::exception& error)
+    {
+        // Preserve a pending default when no network has loaded yet.
+        const auto& activeFile = networks->big.current_file();
+        options.options_map.at("EvalFile").currentValue =
+          activeFile.empty() ? selectedFile : activeFile;
+
+        if (onVerifyNetworks)
+            onVerifyNetworks(std::string("ABJNNUE load failed: ") + error.what());
+        return;
+    }
 }
 
 // utility functions
 
-void Engine::trace_eval() const {
+void Engine::trace_eval() {
     StateListPtr trace_states(new std::deque<StateInfo>(1));
     Position     p;
     p.set(pos.fen(), &trace_states->back());

@@ -21,6 +21,7 @@
 
 #include <string>
 
+#include "abjnnue/abjnnue_accumulator.h"
 #include "types.h"
 
 namespace Stockfish {
@@ -29,16 +30,12 @@ class Position;
 
 namespace Eval {
 
-// The default net name MUST follow the format nn-[SHA256 first 12 digits].nnue
-// for the build process (profile-build and fishtest) to work. Do not change the
-// name of the macro or the location where this macro is defined, as it is used
-// in the Makefile/Fishtest.
-#define EvalFileDefaultNameBig "pikafish.nnue"
-
 namespace NNUE {
+// Default V8.2 network shipped with the release package.
+constexpr const char* EvalFileDefaultNameBig = "abjchess-20260911.nnue";
 struct Networks;
 struct AccumulatorCaches;
-class AccumulatorStack;
+using AccumulatorStack = ::ABJNNUE::AccumulatorStack;
 }
 
 std::string trace(Position& pos, const Eval::NNUE::Networks& networks);
@@ -48,6 +45,14 @@ Value evaluate(const NNUE::Networks&          networks,
                Eval::NNUE::AccumulatorStack&  accumulators,
                Eval::NNUE::AccumulatorCaches& caches,
                int                            optimism);
+
+// Reveal comeback is the sole caller allowed to request a raw static value
+// while the side to move is in check.
+Value evaluate_for_reveal(const NNUE::Networks&          networks,
+                          const Position&                pos,
+                          Eval::NNUE::AccumulatorStack&  accumulators,
+                          Eval::NNUE::AccumulatorCaches& caches,
+                          int                            optimism);
 }  // namespace Eval
 
 }  // namespace Stockfish

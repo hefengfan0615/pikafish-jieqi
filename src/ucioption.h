@@ -62,7 +62,7 @@ class Option {
     friend class Tune;
 
 
-    std::string       defaultValue, currentValue, type;
+    std::string       defaultValue, currentValue, comboValues, type;
     int               min, max;
     size_t            idx;
     OnChange          on_change;

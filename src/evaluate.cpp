@@ -21,21 +21,72 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
-#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
-#include <tuple>
 
-#include "nnue/network.h"
-#include "nnue/nnue_misc.h"
+#include "abjnnue/abjnnue_network.h"
+#include "abjnnue/abjnnue_inference.h"
 #include "position.h"
 #include "types.h"
 #include "uci.h"
-#include "nnue/nnue_accumulator.h"
 
 namespace Stockfish {
+
+namespace {
+
+constexpr int RuntimePieceValue[PIECE_TYPE_NB]   = {0, 943, 190, 491, 101, 438, 168, 0};
+constexpr int RuntimeInitialCount[PIECE_TYPE_NB] = {0, 2, 2, 2, 5, 2, 2, 1};
+
+int runtime_material(const Position& pos) {
+    int            material = 0;
+    const Bitboard dark     = pos.pieces(DARK);
+    for (Color color : {WHITE, BLACK})
+        for (PieceType type = ROOK; type < KING; ++type)
+        {
+            const int pieceValue = RuntimePieceValue[type];
+            const int restCount  = pos.rest_piece(make_piece(color, type));
+            material += restCount * pieceValue;
+            if (type != PAWN)
+            {
+                const int revealedCount = std::max(0, RuntimeInitialCount[type] - restCount);
+                const int onBoardCount  = popcount(pos.pieces(color, type) & ~dark);
+                material += std::min(onBoardCount, revealedCount) * pieceValue;
+            }
+        }
+    return material;
+}
+
+Value runtime_value(const ::ABJNNUE::RawEvaluation& raw, const Position& pos, int optimism) {
+    const int nnue          = (raw.psqtRaw + raw.positionalRaw) / 16;
+    const int complexity    = std::abs(raw.psqtRaw - raw.positionalRaw) / 16;
+    const int material      = runtime_material(pos);
+    const int materialScale = 935 + material * 93 / 5116;
+    const int optimismTerm  = optimism * (complexity + 333) / 256;
+
+    int value = (nnue * materialScale + optimismTerm * (materialScale - 832)) / 1024;
+    value     = value * (218 - std::min(pos.rule40_count(), 120)) / 176;
+    return std::clamp(value, -29507, 29507);
+}
+
+::ABJNNUE::RawEvaluation runtime_raw(const Eval::NNUE::Networks&   networks,
+                                     const Position&               pos,
+                                     Eval::NNUE::AccumulatorStack& accumulators,
+                                     Eval::NNUE::AccumulatorCaches& caches) {
+#if defined(ABJNNUE_RUNTIME_REFRESH_CACHE)
+    const auto view = accumulators.evaluate(networks.big.model(), pos, caches.refresh);
+#else
+    (void) caches;
+    const auto view = accumulators.evaluate(networks.big.model(), pos);
+#endif
+    return ::ABJNNUE::Inference::evaluate_accumulated(networks.big.model(), pos, view.accumulated,
+                                                      ::ABJNNUE::LayerStackSelection{
+                                                        view.layerStackBucket,
+                                                        view.layerStackBlendQ8});
+}
+
+}  // namespace
 
 // Evaluate is the evaluator for the outer world. It returns a static evaluation
 // of the position from the point of view of the side to move.
@@ -44,28 +95,16 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
                      Eval::NNUE::AccumulatorStack&  accumulators,
                      Eval::NNUE::AccumulatorCaches& caches,
                      int                            optimism) {
-
     assert(!pos.checkers());
+    return runtime_value(runtime_raw(networks, pos, accumulators, caches), pos, optimism);
+}
 
-    auto [psqt, positional] = networks.big.evaluate(pos, accumulators, &caches.big);
-
-    Value nnue = psqt + positional;
-
-    // Blend optimism and eval with nnue complexity
-    int nnueComplexity = std::abs(psqt - positional);
-    optimism += optimism * nnueComplexity / 488;
-    nnue -= nnue * nnueComplexity / 11418;
-
-    int material = pos.major_material();
-    int v        = (nnue * (18560 + material) + optimism * (2727 + material)) / 33331;
-
-    // Damp down the evaluation linearly when shuffling
-    v -= (v * pos.rule40_count()) / 217;
-
-    // Guarantee evaluation does not hit the mate range
-    v = std::clamp(v, VALUE_MATED_IN_MAX_PLY + 1, VALUE_MATE_IN_MAX_PLY - 1);
-
-    return v;
+Value Eval::evaluate_for_reveal(const Eval::NNUE::Networks&    networks,
+                                const Position&                pos,
+                                Eval::NNUE::AccumulatorStack&  accumulators,
+                                Eval::NNUE::AccumulatorCaches& caches,
+                                int                            optimism) {
+    return runtime_value(runtime_raw(networks, pos, accumulators, caches), pos, optimism);
 }
 
 // Like evaluate(), but instead of returning a value, it returns
@@ -77,25 +116,16 @@ std::string Eval::trace(Position& pos, const Eval::NNUE::Networks& networks) {
     if (pos.checkers())
         return "Final evaluation: none (in check)";
 
-    Eval::NNUE::AccumulatorStack accumulators;
-    auto                         caches = std::make_unique<Eval::NNUE::AccumulatorCaches>(networks);
+    auto                          accumulators = std::make_unique<Eval::NNUE::AccumulatorStack>();
+    Eval::NNUE::AccumulatorCaches caches(networks);
+    const auto                    raw   = runtime_raw(networks, pos, *accumulators, caches);
+    const auto                    value = runtime_value(raw, pos, 0);
 
     std::stringstream ss;
-    ss << std::showpoint << std::noshowpos << std::fixed << std::setprecision(2);
-    ss << '\n' << NNUE::trace(pos, networks, *caches) << '\n';
-
-    ss << std::showpoint << std::showpos << std::fixed << std::setprecision(2) << std::setw(15);
-
-    auto [psqt, positional] = networks.big.evaluate(pos, accumulators, &caches->big);
-    Value v                 = psqt + positional;
-    v                       = pos.side_to_move() == WHITE ? v : -v;
-    ss << "NNUE evaluation        " << 0.01 * UCIEngine::to_cp(v, pos) << " (white side)\n";
-
-    v = evaluate(networks, pos, accumulators, *caches, VALUE_ZERO);
-    v = pos.side_to_move() == WHITE ? v : -v;
-    ss << "Final evaluation       " << 0.01 * UCIEngine::to_cp(v, pos) << " (white side)";
-    ss << " [with scaled NNUE, ...]";
-    ss << "\n";
+    ss << "\nABJNNUE runtime evaluation\n"
+       << "PSQT raw              " << raw.psqtRaw << "\n"
+       << "Positional raw        " << raw.positionalRaw << "\n"
+       << "Runtime value         " << value << " (side to move)\n";
 
     return ss.str();
 }

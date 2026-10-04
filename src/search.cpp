@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -34,8 +35,7 @@
 #include "misc.h"
 #include "movegen.h"
 #include "movepick.h"
-#include "nnue/network.h"
-#include "nnue/nnue_accumulator.h"
+#include "abjnnue/abjnnue_network.h"
 #include "position.h"
 #include "thread.h"
 #include "timeman.h"
@@ -67,7 +67,7 @@ int correction_value(const Worker& w, const Position& pos, const Stack* const ss
     const auto  bnpcv = w.nonPawnCorrectionHistory[non_pawn_index<BLACK>(pos)][BLACK][us];
     const auto  cntcv =
       m.is_ok() ? (*(ss - 2)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
-                 : 0;
+                : 0;
 
     return 4897 * pcv + 4190 * micv + 8120 * (wnpcv + bnpcv) + 8324 * cntcv;
 }
@@ -100,6 +100,31 @@ void update_correction_history(const Position& pos,
           << bonus * 114 / 128;
 }
 
+constexpr double FlipWinrateScaling = 360.83524;
+
+const std::array<double, 2 * VALUE_MATE + 1> FlipScoreToWinrate = []() {
+    std::array<double, 2 * VALUE_MATE + 1> table{};
+
+    for (int value = -VALUE_MATE; value <= VALUE_MATE; ++value)
+        table[std::size_t(value + VALUE_MATE)] =
+          1.0 / (1.0 + std::exp(-double(value) / FlipWinrateScaling));
+
+    return table;
+}();
+
+double flip_score_to_winrate(Value v) {
+    v = std::clamp(v, -VALUE_MATE, VALUE_MATE);
+    return FlipScoreToWinrate[std::size_t(v + VALUE_MATE)];
+}
+
+Value flip_winrate_to_score(double winrate) {
+    constexpr double epsilon = 1e-9;
+    winrate                  = std::clamp(winrate, epsilon, 1.0 - epsilon);
+    double q                 = std::log(winrate / (1.0 - winrate));
+    return std::clamp(static_cast<Value>(q * FlipWinrateScaling), VALUE_MATED_IN_MAX_PLY + 1,
+                      VALUE_MATE_IN_MAX_PLY - 1);
+}
+
 // Add a small random component to draw evaluations to avoid 3-fold blindness
 Value value_draw(size_t nodes) { return VALUE_DRAW - 1 + Value(nodes & 0x2); }
 Value value_to_tt(Value v, int ply);
@@ -107,7 +132,7 @@ Value value_from_tt(Value v, int ply, int r40c);
 void  update_pv(Move* pv, Move move, const Move* childPv);
 void  update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus);
 void  update_quiet_histories(
-   const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus);
+  const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus);
 void update_all_stats(const Position& pos,
                       Stack*          ss,
                       Search::Worker& workerThread,
@@ -119,7 +144,68 @@ void update_all_stats(const Position& pos,
                       Move            TTMove,
                       int             moveCount);
 
+ChasingRule chasing_rule(const OptionsMap& options) {
+    return options["ChasingRule"] == "skyrule_Jieqi" ? CHASING_RULE_SKYRULE_JIEQI
+                                                     : CHASING_RULE_GITHUB;
+}
+
+inline int configured_aggressive_level(const OptionsMap& options) {
+#if defined(ABJCHESS_RELEASE)
+    (void) options;
+    return 3;
+#else
+    return int(options["AggressiveLevel"]);
+#endif
+}
+
 }  // namespace
+
+Key Search::observer_tt_key(Key positionKey, Color rootObserver) {
+    constexpr Key WhiteObserverSalt = 0x243F6A8885A308D3ULL;
+    constexpr Key BlackObserverSalt = 0x13198A2E03707344ULL;
+
+    assert(rootObserver == WHITE || rootObserver == BLACK);
+    return positionKey ^ (rootObserver == WHITE ? WhiteObserverSalt : BlackObserverSalt);
+}
+
+int Search::hidden_capture_candidates(const Position&          position,
+                                      Color                    rootObserver,
+                                      bool                     capturedDark,
+                                      Position::RestPieceList& candidates) {
+    if (!capturedDark || ~position.side_to_move() != rootObserver)
+        return 0;
+
+    return position.rest_pieces(position.side_to_move(), candidates);
+}
+
+Depth Search::chance_branch_depth(Depth depth, int branchIndex) {
+    return depth <= 1 || branchIndex == 0 ? depth : depth - 1;
+}
+
+Search::ProbCutContext Search::probcut_context(Value probCutBeta,
+                                               Depth nodeDepth,
+                                               bool  capturedDark) {
+    return {capturedDark ? std::min(probCutBeta + 64, VALUE_INFINITE - 1) : probCutBeta,
+            std::max(nodeDepth - (capturedDark ? 6 : 5), 0)};
+}
+
+Reveal::Parameters Search::snapshot_reveal_parameters(const OptionsMap& options) {
+#if defined(ABJCHESS_RELEASE)
+    (void) options;
+    // Release builds bake in the validated defaults and omit research UCI knobs.
+    return {0, 0, 0, 0, 0, 0, 0, 0,
+            -12, 0, 24, -12, 0, 0, 0, 0};
+#else
+    return {int(options["RevealBonusBase"]),       int(options["RevealBonusPhase"]),
+            int(options["RevealBonusPool"]),       int(options["RevealBonusUnknown"]),
+            int(options["RevealBonusComeback"]),   int(options["RevealMoveOrder"]),
+            int(options["RevealReduction"]),       int(options["RevealPruningMargin"]),
+            int(options["RevealQuietBase"]),       int(options["RevealQuietPhase"]),
+            int(options["RevealQuietSafety"]),     int(options["RevealQuietHighValue"]),
+            int(options["RevealQuietDiversity"]),  int(options["RevealQuietComeback"]),
+            int(options["RevealQuietMoveOrder"]),  int(options["RevealQuietReduction"])};
+#endif
+}
 
 Search::Worker::Worker(SharedState&                    sharedState,
                        std::unique_ptr<ISearchManager> sm,
@@ -137,6 +223,11 @@ Search::Worker::Worker(SharedState&                    sharedState,
     clear();
 }
 
+void Search::Worker::refresh_chasing_rule() {
+    searchRule = chasing_rule(options);
+    useSkyrule = searchRule == CHASING_RULE_SKYRULE_JIEQI;
+}
+
 void Search::Worker::ensure_network_replicated() {
     // Access once to force lazy initialization.
     // We do this because we want to avoid initialization during search.
@@ -145,7 +236,21 @@ void Search::Worker::ensure_network_replicated() {
 
 void Search::Worker::start_searching() {
 
+    refresh_chasing_rule();
+    reset_correction_histories();
+    revealParameters   = snapshot_reveal_parameters(options);
+    revealPruningSlots = Reveal::pruning_slots(revealParameters.pruningMargin);
+    quietRewardEnabled = Reveal::quiet_bonus_enabled(revealParameters);
+    quietSafetyNeeded  = quietRewardEnabled || revealParameters.quietMoveOrder != 0
+                     || revealParameters.quietReduction != 0;
+    revealSearchTuning = Reveal::bonus_enabled(revealParameters)
+                      || revealParameters.moveOrder != 0 || revealParameters.reduction != 0
+                      || revealParameters.pruningMargin != 0 || quietSafetyNeeded;
+    rootObserver       = rootPos.side_to_move();
     accumulatorStack.reset();
+#if defined(ABJNNUE_RUNTIME_REFRESH_CACHE)
+    refreshTable.clear(networks[numaAccessToken]);
+#endif
 
     // Non-main threads go directly to iterative_deepening()
     if (!is_mainthread())
@@ -175,7 +280,7 @@ void Search::Worker::start_searching() {
     // GUI sends a "stop" or "ponderhit" command. We therefore simply wait here
     // until the GUI sends one of those commands.
     while (!threads.stop && (main_manager()->ponder || limits.infinite))
-    {}  // Busy wait for a stop or a ponder reset
+    { }  // Busy wait for a stop or a ponder reset
 
     // Stop the threads if not already stopped (also raise the stop if
     // "ponderhit" just reset threads.ponder)
@@ -205,7 +310,7 @@ void Search::Worker::start_searching() {
     std::string ponder;
 
     if ((bestThread->rootMoves[0].pv.size() > 1
-        || bestThread->rootMoves[0].extract_ponder_from_tt(tt, rootPos))
+         || bestThread->rootMoves[0].extract_ponder_from_tt(tt, rootPos, rootObserver))
         && !rootPos.move_dark(bestThread->rootMoves[0].pv[0]))
         ponder = UCIEngine::move(bestThread->rootMoves[0].pv[1]);
 
@@ -313,7 +418,10 @@ void Search::Worker::iterative_deepening() {
                 Depth adjustedDepth =
                   std::max(1, rootDepth - failedHighCnt - 3 * (searchAgainCounter + 1) / 3);
                 rootDelta = beta - alpha;
-                bestValue = search<Root>(rootPos, ss, alpha, beta, adjustedDepth, false);
+                if (__builtin_expect(revealSearchTuning, false))
+                    bestValue = search<Root, true>(rootPos, ss, alpha, beta, adjustedDepth, false);
+                else
+                    bestValue = search<Root, false>(rootPos, ss, alpha, beta, adjustedDepth, false);
 
                 // Bring the best move to the front. It is critical that sorting
                 // is done with a stable algorithm because all the values but the
@@ -476,9 +584,9 @@ void Search::Worker::do_move(Position& pos, const Move move, StateInfo& st) {
 }
 
 void Search::Worker::do_move(Position& pos, const Move move, StateInfo& st, const bool givesCheck) {
-    DirtyPiece dp = pos.do_move(move, st, givesCheck, &tt);
+    const DirtyPiece dp = pos.do_move(move, st, givesCheck, &tt);
+    accumulatorStack.push(dp, pos);
     nodes.fetch_add(1, std::memory_order_relaxed);
-    accumulatorStack.push(dp);
 }
 
 void Search::Worker::do_null_move(Position& pos, StateInfo& st) { pos.do_null_move(st, tt); }
@@ -496,15 +604,9 @@ void Search::Worker::clear() {
     mainHistory.fill(51);
     captureHistory.fill(-560);
     pawnHistory.fill(-1083);
-    pawnCorrectionHistory.fill(6);
-    minorPieceCorrectionHistory.fill(0);
-    nonPawnCorrectionHistory.fill(0);
+    reset_correction_histories();
 
     ttMoveHistory = 0;
-
-    for (auto& to : continuationCorrectionHistory)
-        for (auto& h : to)
-            h.fill(7);
 
     for (bool inCheck : {false, true})
         for (StatsType c : {NoCaptures, Captures})
@@ -515,12 +617,24 @@ void Search::Worker::clear() {
     for (size_t i = 1; i < reductions.size(); ++i)
         reductions[i] = int(2321 / (849 / 10.0) * std::log(i));
 
+#if defined(ABJNNUE_RUNTIME_REFRESH_CACHE)
     refreshTable.clear(networks[numaAccessToken]);
+#endif
+}
+
+void Search::Worker::reset_correction_histories() {
+    pawnCorrectionHistory.fill(6);
+    minorPieceCorrectionHistory.fill(0);
+    nonPawnCorrectionHistory.fill(0);
+
+    for (auto& to : continuationCorrectionHistory)
+        for (auto& h : to)
+            h.fill(7);
 }
 
 
 // Main search function for both PV and non-PV nodes
-template<NodeType nodeType>
+template<NodeType nodeType, bool UseReveal>
 Value Search::Worker::search(
   Position& pos, Stack* ss, Value alpha, Value beta, Depth depth, bool cutNode) {
 
@@ -532,14 +646,14 @@ Value Search::Worker::search(
     if (depth <= 0)
     {
         constexpr auto nt = PvNode ? PV : NonPV;
-        return qsearch<nt>(pos, ss, alpha, beta);
+        return qsearch<nt, UseReveal>(pos, ss, alpha, beta);
     }
 
     // Dive into flip search when the last move is moving a dark pieces
     if ((ss - 1)->currentMove.is_ok() && pos.is_dark((ss - 1)->currentMove.to_sq()))
     {
         constexpr auto nt = PvNode ? PV : NonPV;
-        return flip_search<nt>(pos, ss, alpha, beta, false, depth, cutNode);
+        return flip_search<nt, UseReveal>(pos, ss, alpha, beta, false, depth, cutNode);
     }
 
     // Limit the depth if extensions made it too large
@@ -558,7 +672,7 @@ Value Search::Worker::search(
     Depth extension, newDepth;
     Value bestValue, value, eval, maxValue, probCutBeta;
     bool  givesCheck, improving, priorCapture, opponentWorsening;
-    bool  capture, ttCapture;
+    bool  capture, ttCapture, revealMove;
     int   priorReduction;
     Piece movedPiece;
 
@@ -586,7 +700,7 @@ Value Search::Worker::search(
     {
         // Step 2. Check for aborted search and repetition
         Value result = VALUE_NONE;
-        if (pos.rule_judge(result, ss->ply))
+        if (pos.rule_judge(result, ss->ply, searchRule))
             return result == VALUE_DRAW ? value_draw(thisThread->nodes) : result;
         if (result != VALUE_NONE)
         {
@@ -617,7 +731,6 @@ Value Search::Worker::search(
         if (alpha >= beta)
             return alpha;
     }
-
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
 
     Square prevSq  = ((ss - 1)->currentMove).is_ok() ? ((ss - 1)->currentMove).to_sq() : SQ_NONE;
@@ -630,7 +743,7 @@ Value Search::Worker::search(
 
     // Step 4. Transposition table lookup
     excludedMove                   = ss->excludedMove;
-    posKey                         = pos.key();
+    posKey                         = observer_tt_key(pos.key(), rootObserver);
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey);
     // Need further processing of the saved data
     ss->ttHit    = ttHit;
@@ -640,12 +753,14 @@ Value Search::Worker::search(
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule40_count()) : VALUE_NONE;
     ss->ttPv     = excludedMove ? ss->ttPv : PvNode || (ttHit && ttData.is_pv);
     ttCapture    = ttData.move && pos.capture(ttData.move);
+    const bool canUseTTPruning =
+      !useSkyrule || std::min(pos.rule40_count(), pos.state()->pliesFromNull) < 8;
 
     // At this point, if excluded, skip straight to step 5, static eval. However,
     // to save indentation, we list the condition in all code between here and there.
 
     // At non-PV nodes we check for an early TT cutoff
-    if (!PvNode && !excludedMove && ttData.depth > depth - (ttData.value <= beta)
+    if (canUseTTPruning && !PvNode && !excludedMove && ttData.depth > depth - (ttData.value <= beta)
         && is_valid(ttData.value)  // Can happen when !ttHit or when access race in probe()
         && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER))
         && (cutNode == (ttData.value >= beta) || depth > 5))
@@ -667,11 +782,12 @@ Value Search::Worker::search(
         // For high rule40 counts don't produce transposition table cutoffs.
         if (pos.rule40_count() < 70)
         {
-            if (depth >= 8 && ttData.move && pos.pseudo_legal(ttData.move) && pos.legal(ttData.move)
-                && !is_decisive(ttData.value) && !pos.move_dark(ttData.move))
+            if (!useSkyrule && depth >= 8 && ttData.move && pos.pseudo_legal(ttData.move)
+                && pos.legal(ttData.move) && !is_decisive(ttData.value)
+                && !pos.move_dark(ttData.move))
             {
                 do_move(pos, ttData.move, st);
-                Key nextPosKey                             = pos.key();
+                Key nextPosKey = observer_tt_key(pos.key(), rootObserver);
                 auto [ttHitNext, ttDataNext, ttWriterNext] = tt.probe(nextPosKey);
                 undo_move(pos, ttData.move);
 
@@ -685,6 +801,11 @@ Value Search::Worker::search(
                 return ttData.value;
         }
     }
+    else if (canUseTTPruning && !PvNode && !excludedMove
+             && ttData.depth > depth - (ttData.value <= beta) && is_valid(ttData.value)
+             && ttData.bound != BOUND_EXACT
+             && (ttData.bound & (ttData.value >= beta ? BOUND_UPPER : BOUND_LOWER)) && depth > 5)
+        ttWriter.penalize(1);
 
     // Step 5. Static evaluation of the position
     Value      unadjustedStaticEval = VALUE_NONE;
@@ -697,7 +818,10 @@ Value Search::Worker::search(
         goto moves_loop;
     }
     else if (excludedMove)
-        unadjustedStaticEval = eval = ss->staticEval;
+    {
+        eval                 = ss->staticEval;
+        unadjustedStaticEval = Reveal::raw_eval_for_research(ttData.eval, ss->staticEval);
+    }
     else if (ss->ttHit)
     {
         // Never assume anything about values stored in TT
@@ -708,7 +832,7 @@ Value Search::Worker::search(
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
         // ttValue can be used as a better position evaluation
-        if (is_valid(ttData.value)
+        if (canUseTTPruning && is_valid(ttData.value)
             && (ttData.bound & (ttData.value > eval ? BOUND_LOWER : BOUND_UPPER)))
             eval = ttData.value;
     }
@@ -723,7 +847,8 @@ Value Search::Worker::search(
     }
 
     // Use static evaluation difference to improve quiet move ordering
-    if (((ss - 1)->currentMove).is_ok() && !(ss - 1)->inCheck && !priorCapture && !ttHit)
+    if (((ss - 1)->currentMove).is_ok() && !(ss - 1)->inCheck && !priorCapture && !ttHit
+        && prevSq != SQ_NONE && !pos.is_dark(prevSq))
     {
         int bonus = std::clamp(-19 * int((ss - 1)->staticEval + ss->staticEval), -1271, 1725) + 379;
         thisThread->mainHistory[~us][((ss - 1)->currentMove).from_to()] << bonus * 1269 / 1024;
@@ -749,7 +874,7 @@ Value Search::Worker::search(
     // If eval is really low, skip search entirely and return the qsearch value.
     // For PvNodes, we must have a guard against mates being returned.
     if (!PvNode && eval < alpha - 1130 - 252 * depth * depth)
-        return qsearch<NonPV>(pos, ss, alpha, beta);
+        return qsearch<NonPV, UseReveal>(pos, ss, alpha, beta);
 
     // Step 7. Futility pruning: child node
     // The depth condition is important for mate finding.
@@ -780,12 +905,14 @@ Value Search::Worker::search(
         Depth R = 7 + depth / 3;
 
         ss->currentMove                   = Move::null();
+        ss->capturedDark                  = false;
         ss->continuationHistory           = &thisThread->continuationHistory[0][0][NO_PIECE][0];
         ss->continuationCorrectionHistory = &thisThread->continuationCorrectionHistory[NO_PIECE][0];
 
         do_null_move(pos, st);
 
-        Value nullValue = -search<NonPV>(pos, ss + 1, -beta, -beta + 1, depth - R, false);
+        Value nullValue =
+          -search<NonPV, UseReveal>(pos, ss + 1, -beta, -beta + 1, depth - R, false);
 
         undo_null_move(pos);
 
@@ -801,7 +928,7 @@ Value Search::Worker::search(
             // until ply exceeds nmpMinPly.
             thisThread->nmpMinPly = ss->ply + 3 * (depth - R) / 4;
 
-            Value v = search<NonPV>(pos, ss, beta - 1, beta, depth - R, false);
+            Value v = search<NonPV, UseReveal>(pos, ss, beta - 1, beta, depth - R, false);
 
             thisThread->nmpMinPly = 0;
 
@@ -826,14 +953,25 @@ Value Search::Worker::search(
         && !is_decisive(beta)
         // If value from transposition table is lower than probCutBeta, don't attempt
         // probCut there
-        && !(is_valid(ttData.value) && ttData.value < probCutBeta))
+        && !(canUseTTPruning && is_valid(ttData.value) && ttData.value < probCutBeta))
     {
         assert(probCutBeta < VALUE_INFINITE && probCutBeta > beta);
 
-        MovePicker mp(pos, ttData.move, probCutBeta - ss->staticEval, &thisThread->captureHistory);
-        Depth      probCutDepth = std::max(depth - 5, 0);
-
-        while ((move = mp.next_move()) != Move::none())
+        const Reveal::OrderingParameters ordering{revealParameters.moveOrder,
+                                                   revealParameters.quietMoveOrder,
+                                                   revealParameters.pruningMargin};
+        const bool tunedMovePicker = UseReveal
+                                  && (ordering.darkMoveOrder != 0
+                                      || ordering.quietMoveOrder != 0
+                                      || ordering.pruningMargin != 0);
+        MovePicker mp = tunedMovePicker
+                        ? MovePicker(pos, ttData.move, probCutBeta - ss->staticEval,
+                                     &thisThread->captureHistory, ordering)
+                        : MovePicker(pos, ttData.move, probCutBeta - ss->staticEval,
+                                     &thisThread->captureHistory);
+        while ((move = tunedMovePicker ? mp.next_reveal_move(false, false)
+                                       : mp.next_move())
+               != Move::none())
         {
             assert(move.is_ok());
 
@@ -842,9 +980,19 @@ Value Search::Worker::search(
 
             assert(pos.capture(move));
 
-            movedPiece = pos.moved_piece(move);
+            movedPiece                = pos.moved_piece(move);
+            revealMove                = UseReveal && pos.move_dark(move);
+            const Reveal::QuietMoveContext quietContext{};
+            assert(!quietContext.eligible || (revealMove && !pos.capture(move)));
+            const int moveRevealBonus =
+              revealMove ? reveal_bonus(pos, quietContext, unadjustedStaticEval) : 0;
 
+            const bool probCutCapturedDark = pos.is_dark(move.to_sq());
+            ss->capturedDark               = probCutCapturedDark;
             do_move(pos, move, st);
+
+            const ProbCutContext localProbCut =
+              probcut_context(probCutBeta, depth, probCutCapturedDark);
 
             ss->currentMove = move;
             ss->continuationHistory =
@@ -853,23 +1001,34 @@ Value Search::Worker::search(
               &this->continuationCorrectionHistory[movedPiece][move.to_sq()];
 
             // Perform a preliminary qsearch to verify that the move holds
-            value = -qsearch<NonPV>(pos, ss + 1, -probCutBeta, -probCutBeta + 1);
+            value = moveRevealBonus == 0
+                    ? -hidden_capture_search<NonPV, UseReveal>(pos, ss + 1,
+                                                               -localProbCut.beta,
+                                                               1 - localProbCut.beta)
+                    : reveal_search<NonPV, UseReveal>(pos, ss + 1, localProbCut.beta - 1,
+                                                      localProbCut.beta, moveRevealBonus);
 
             // If the qsearch held, perform the regular search
-            if (value >= probCutBeta && probCutDepth > 0)
-                value = -search<NonPV>(pos, ss + 1, -probCutBeta, -probCutBeta + 1, probCutDepth,
-                                       !cutNode);
+            if (value >= localProbCut.beta && localProbCut.depth > 0)
+                value = moveRevealBonus == 0
+                        ? -hidden_capture_search<NonPV, UseReveal>(
+                            pos, ss + 1, -localProbCut.beta, 1 - localProbCut.beta, false,
+                            localProbCut.depth, !cutNode)
+                        : reveal_search<NonPV, UseReveal>(
+                            pos, ss + 1, localProbCut.beta - 1, localProbCut.beta,
+                            moveRevealBonus, false, localProbCut.depth, !cutNode);
 
             undo_move(pos, move);
 
-            if (value >= probCutBeta)
+            if (value >= localProbCut.beta)
             {
                 // Save ProbCut data into transposition table
                 ttWriter.write(posKey, value_to_tt(value, ss->ply), ss->ttPv, BOUND_LOWER,
-                               probCutDepth + 1, move, unadjustedStaticEval, tt.generation());
+                               localProbCut.depth + 1, move, unadjustedStaticEval,
+                               tt.generation());
 
                 if (!is_decisive(value))
-                    return value - (probCutBeta - beta);
+                    return value - (localProbCut.beta - beta);
             }
         }
     }
@@ -878,8 +1037,9 @@ moves_loop:  // When in check, search starts here
 
     // Step 11. A small Probcut idea
     probCutBeta = beta + 430;
-    if ((ttData.bound & BOUND_LOWER) && ttData.depth >= depth - 4 && ttData.value >= probCutBeta
-        && !is_decisive(beta) && is_valid(ttData.value) && !is_decisive(ttData.value))
+    if (canUseTTPruning && (ttData.bound & BOUND_LOWER) && ttData.depth >= depth - 4
+        && ttData.value >= probCutBeta && !is_decisive(beta) && is_valid(ttData.value)
+        && !is_decisive(ttData.value))
         return probCutBeta;
 
     const PieceToHistory* contHist[] = {
@@ -887,16 +1047,33 @@ moves_loop:  // When in check, search starts here
       (ss - 4)->continuationHistory, (ss - 5)->continuationHistory, (ss - 6)->continuationHistory};
 
 
-    MovePicker mp(pos, ttData.move, depth, &thisThread->mainHistory, &thisThread->lowPlyHistory,
-                  &thisThread->captureHistory, contHist, &thisThread->pawnHistory, ss->ply);
+    const Reveal::OrderingParameters ordering{revealParameters.moveOrder,
+                                               revealParameters.quietMoveOrder,
+                                               revealParameters.pruningMargin};
+    const bool tunedMovePicker = UseReveal
+                              && (ordering.darkMoveOrder != 0 || ordering.quietMoveOrder != 0
+                                  || ordering.pruningMargin != 0);
+    MovePicker mp =
+      tunedMovePicker
+        ? MovePicker(pos, ttData.move, depth, &thisThread->mainHistory, &thisThread->lowPlyHistory,
+                     &thisThread->captureHistory, contHist, &thisThread->pawnHistory, ss->ply,
+                     ordering)
+        : MovePicker(pos, ttData.move, depth, &thisThread->mainHistory, &thisThread->lowPlyHistory,
+                     &thisThread->captureHistory, contHist, &thisThread->pawnHistory, ss->ply);
 
     value = bestValue;
 
     int moveCount = 0;
 
+    bool keepDarkQuiets = false;
+    bool skipDarkQuiets = false;
+
     // Step 12. Loop through all pseudo-legal moves until no moves remain
     // or a beta cutoff occurs.
-    while ((move = mp.next_move()) != Move::none())
+    while ((move = tunedMovePicker
+                     ? mp.next_reveal_move(keepDarkQuiets, skipDarkQuiets)
+                     : mp.next_move())
+           != Move::none())
     {
         assert(move.is_ok());
 
@@ -914,6 +1091,14 @@ moves_loop:  // When in check, search starts here
                            thisThread->rootMoves.begin() + thisThread->pvLast, move))
             continue;
 
+        capture    = pos.capture(move);
+        revealMove = UseReveal && pos.move_dark(move);
+        const Reveal::QuietMoveContext quietContext =
+          Reveal::quiet_move_context(pos, move, UseReveal && quietSafetyNeeded);
+        assert(!quietContext.eligible || (revealMove && !capture));
+        if (useSkyrule && !capture && !pos.move_dark(move) && pos.forbidden_by_skyrule_jieqi(move))
+            continue;
+
         ss->moveCount = ++moveCount;
 
         if (rootNode && is_mainthread() && nodes > 10000000)
@@ -925,7 +1110,6 @@ moves_loop:  // When in check, search starts here
             (ss + 1)->pv = nullptr;
 
         extension  = 0;
-        capture    = pos.capture(move);
         movedPiece = pos.moved_piece(move);
         givesCheck = pos.gives_check(move);
 
@@ -937,6 +1121,8 @@ moves_loop:  // When in check, search starts here
         int delta = beta - alpha;
 
         Depth r = reduction(improving, depth, moveCount, delta);
+        if constexpr (UseReveal)
+            r = Reveal::adjust_reduction(r, revealMove, quietContext.safe(), revealParameters);
 
         // Increase reduction for ttPv nodes (*Scaler)
         // Smaller or even negative value is better for short time controls
@@ -949,8 +1135,32 @@ moves_loop:  // When in check, search starts here
         if (!rootNode && pos.major_material(us) && !is_loss(bestValue))
         {
             // Skip quiet moves if movecount exceeds our FutilityMoveCount threshold
-            if (moveCount >= (3 + depth * depth) / (2 - improving))
-                mp.skip_quiet_moves();
+            const int baseMoveCountLimit = (3 + depth * depth) / (2 - improving);
+            if constexpr (!UseReveal)
+            {
+                if (moveCount >= baseMoveCountLimit)
+                    mp.skip_quiet_moves();
+            }
+            else
+            {
+                if (revealParameters.pruningMargin == 0)
+                {
+                    if (moveCount >= baseMoveCountLimit)
+                        mp.skip_quiet_moves();
+                }
+                else
+                {
+                    const auto quietPruning = Reveal::quiet_pruning_after_move(
+                      moveCount, baseMoveCountLimit, revealPruningSlots);
+
+                    if (quietPruning.skipVisibleQuiets)
+                        mp.skip_quiet_moves();
+
+                    keepDarkQuiets =
+                      quietPruning.skipVisibleQuiets && !quietPruning.skipDarkQuiets;
+                    skipDarkQuiets = quietPruning.skipDarkQuiets;
+                }
+            }
 
             // Reduced depth of the next LMR search
             int lmrDepth = newDepth - r / 811;
@@ -965,14 +1175,16 @@ moves_loop:  // When in check, search starts here
                 if (!givesCheck && lmrDepth < 18 && !ss->inCheck)
                 {
                     Value futilityValue = ss->staticEval + 307 + 365 * lmrDepth
-                                        + PieceValue[capturedPiece] + 105 * captHist / 491;
+                                        + PieceValue[capturedPiece] + 105 * captHist / 491
+                                        + (revealMove ? revealParameters.pruningMargin : 0);
                     if (futilityValue <= alpha)
                         continue;
                 }
 
                 // SEE based pruning for captures and checks
                 int seeHist = std::clamp(captHist / 30, -204 * depth, 186 * depth);
-                if (!pos.see_ge(move, -225 * depth - seeHist))
+                if (!pos.see_ge(move, -225 * depth - seeHist
+                                        - (revealMove ? revealParameters.pruningMargin : 0)))
                     continue;
             }
             else
@@ -983,16 +1195,17 @@ moves_loop:  // When in check, search starts here
                   + thisThread->pawnHistory[pawn_structure_index(pos)][movedPiece][move.to_sq()];
 
                 // Continuation history based pruning
-                if (history < -3491 * depth)
+                if (history < -3491 * depth - (revealMove ? 8 * revealParameters.pruningMargin : 0))
                     continue;
 
                 history += 60 * thisThread->mainHistory[us][move.from_to()] / 28;
 
                 lmrDepth += history / 3626;
 
-                Value baseFutility = (bestMove ? 48 : 275);
-                Value futilityValue =
-                  ss->staticEval + baseFutility + 126 * lmrDepth + 103 * (ss->staticEval > alpha);
+                Value baseFutility  = (bestMove ? 48 : 275);
+                Value futilityValue = ss->staticEval + baseFutility + 126 * lmrDepth
+                                    + 103 * (ss->staticEval > alpha)
+                                    + (revealMove ? revealParameters.pruningMargin : 0);
 
                 // Futility pruning: parent node
                 // (*Scaler): Generally, more frequent futility pruning
@@ -1008,7 +1221,8 @@ moves_loop:  // When in check, search starts here
                 lmrDepth = std::max(lmrDepth, 0);
 
                 // Prune moves with negative SEE
-                if (!pos.see_ge(move, -38 * lmrDepth * lmrDepth))
+                if (!pos.see_ge(move, -38 * lmrDepth * lmrDepth
+                                        - (revealMove ? revealParameters.pruningMargin : 0)))
                     continue;
             }
         }
@@ -1024,7 +1238,7 @@ moves_loop:  // When in check, search starts here
         // (*Scaler) Generally, higher singularBeta (i.e closer to ttValue)
         // and lower extension margins scale well.
 
-        if (!rootNode && move == ttData.move && !excludedMove
+        if (canUseTTPruning && !rootNode && move == ttData.move && !excludedMove
             && depth >= 5 - (thisThread->completedDepth > 32) + ss->ttPv && is_valid(ttData.value)
             && !is_decisive(ttData.value) && (ttData.bound & BOUND_LOWER)
             && ttData.depth >= depth - 3)
@@ -1033,7 +1247,8 @@ moves_loop:  // When in check, search starts here
             Depth singularDepth = newDepth / 2;
 
             ss->excludedMove = move;
-            value = search<NonPV>(pos, ss, singularBeta - 1, singularBeta, singularDepth, cutNode);
+            value = search<NonPV, UseReveal>(pos, ss, singularBeta - 1, singularBeta, singularDepth,
+                                             cutNode);
             ss->excludedMove = Move::none();
 
             if (value < singularBeta)
@@ -1078,6 +1293,9 @@ moves_loop:  // When in check, search starts here
         }
 
         // Step 15. Make the move
+        const int moveRevealBonus =
+          revealMove ? reveal_bonus(pos, quietContext, unadjustedStaticEval) : 0;
+        ss->capturedDark          = capture && pos.is_dark(move.to_sq());
         do_move(pos, move, st, givesCheck);
 
         // Add extension to new depth
@@ -1146,7 +1364,11 @@ moves_loop:  // When in check, search starts here
                     + (ss - 1)->isPvNode;
 
             ss->reduction = newDepth - d;
-            value         = -search<NonPV>(pos, ss + 1, -(alpha + 1), -alpha, d, true);
+            value = moveRevealBonus == 0
+                    ? -hidden_capture_search<NonPV, UseReveal>(pos, ss + 1, -alpha - 1, -alpha,
+                                                               false, d, true)
+                    : reveal_search<NonPV, UseReveal>(pos, ss + 1, alpha, alpha + 1,
+                                                      moveRevealBonus, false, d, true);
             ss->reduction = 0;
 
             // Do a full-depth search when reduced LMR search fails high
@@ -1162,7 +1384,12 @@ moves_loop:  // When in check, search starts here
                 newDepth += doDeeperSearch - doShallowerSearch;
 
                 if (newDepth > d)
-                    value = -search<NonPV>(pos, ss + 1, -(alpha + 1), -alpha, newDepth, !cutNode);
+                    value = moveRevealBonus == 0
+                            ? -hidden_capture_search<NonPV, UseReveal>(
+                                pos, ss + 1, -alpha - 1, -alpha, false, newDepth, !cutNode)
+                            : reveal_search<NonPV, UseReveal>(pos, ss + 1, alpha, alpha + 1,
+                                                              moveRevealBonus, false, newDepth,
+                                                              !cutNode);
 
                 // Post LMR continuation history updates
                 update_continuation_histories(ss, movedPiece, move.to_sq(), 1533);
@@ -1181,8 +1408,14 @@ moves_loop:  // When in check, search starts here
             r -= ttMoveHistory / 8;
 
             // Note that if expected reduction is high, we reduce search depth here
-            value = -search<NonPV>(pos, ss + 1, -(alpha + 1), -alpha,
-                                   newDepth - (r > 4170) - (r > 5563 && newDepth > 2), !cutNode);
+            value =
+              moveRevealBonus == 0
+                ? -hidden_capture_search<NonPV, UseReveal>(
+                    pos, ss + 1, -alpha - 1, -alpha, false,
+                    newDepth - (r > 4170) - (r > 5563 && newDepth > 2), !cutNode)
+                : reveal_search<NonPV, UseReveal>(
+                    pos, ss + 1, alpha, alpha + 1, moveRevealBonus, false,
+                    newDepth - (r > 4170) - (r > 5563 && newDepth > 2), !cutNode);
         }
 
         // For PV nodes only, do a full PV search on the first move or after a fail high,
@@ -1196,7 +1429,11 @@ moves_loop:  // When in check, search starts here
             if (move == ttData.move && thisThread->rootDepth > 8)
                 newDepth = std::max(newDepth, 1);
 
-            value = -search<PV>(pos, ss + 1, -beta, -alpha, newDepth, false);
+            value = moveRevealBonus == 0
+                    ? -hidden_capture_search<PV, UseReveal>(pos, ss + 1, -beta, -alpha, false,
+                                                            newDepth, false)
+                    : reveal_search<PV, UseReveal>(pos, ss + 1, alpha, beta, moveRevealBonus, false,
+                                                   newDepth, false);
         }
 
         // Step 18. Undo move
@@ -1404,7 +1641,7 @@ moves_loop:  // When in check, search starts here
 // To fight this horizon effect, we implement this qsearch of tactical moves.
 // See https://www.chessprogramming.org/Horizon_Effect
 // and https://www.chessprogramming.org/Quiescence_Search
-template<NodeType nodeType>
+template<NodeType nodeType, bool UseReveal>
 Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta) {
 
     static_assert(nodeType != Root);
@@ -1414,7 +1651,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     if ((ss - 1)->currentMove.is_ok() && pos.is_dark((ss - 1)->currentMove.to_sq()))
     {
         constexpr auto nt = PvNode ? PV : NonPV;
-        return flip_search<nt>(pos, ss, alpha, beta);
+        return flip_search<nt, UseReveal>(pos, ss, alpha, beta);
     }
 
     assert(alpha >= -VALUE_INFINITE && alpha < beta && beta <= VALUE_INFINITE);
@@ -1426,7 +1663,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     Key   posKey;
     Move  move, bestMove;
     Value bestValue, value, futilityBase;
-    bool  pvHit, givesCheck, capture;
+    bool  pvHit, givesCheck, capture, revealMove;
     int   moveCount;
 
     // Step 1. Initialize node
@@ -1441,13 +1678,21 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     ss->inCheck        = bool(pos.checkers());
     moveCount          = 0;
 
+    // Qsearch can traverse a large tactical subtree without re-entering the
+    // normal search function. Check the same movetime watchdog at its entry
+    // and abort promptly when the limit has already expired.
+    if (is_mainthread())
+        main_manager()->check_time(*thisThread);
+    if (threads.stop.load(std::memory_order_relaxed))
+        return VALUE_ZERO;
+
     // Used to send selDepth info to GUI (selDepth counts from 1, ply from 0)
     if (PvNode && thisThread->selDepth < ss->ply + 1)
         thisThread->selDepth = ss->ply + 1;
 
     // Step 2. Check for repetition or maximum ply reached
     Value result = VALUE_NONE;
-    if (pos.rule_judge(result, ss->ply))
+    if (pos.rule_judge(result, ss->ply, searchRule))
         return result;
     if (result != VALUE_NONE)
     {
@@ -1472,16 +1717,18 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
 
     // Step 3. Transposition table lookup
-    posKey                         = pos.key();
+    posKey                         = observer_tt_key(pos.key(), rootObserver);
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey);
     // Need further processing of the saved data
     ss->ttHit    = ttHit;
     ttData.move  = ttHit ? ttData.move : Move::none();
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule40_count()) : VALUE_NONE;
     pvHit        = ttHit && ttData.is_pv;
+    const bool canUseTTPruning =
+      !useSkyrule || std::min(pos.rule40_count(), pos.state()->pliesFromNull) < 8;
 
     // At non-PV nodes we check for an early TT cutoff
-    if (!PvNode && ttData.depth >= DEPTH_QS
+    if (canUseTTPruning && !PvNode && ttData.depth >= DEPTH_QS
         && is_valid(ttData.value)  // Can happen when !ttHit or when access race in probe()
         && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER)))
         return ttData.value;
@@ -1504,7 +1751,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
             // ttValue can be used as a better position evaluation
-            if (is_valid(ttData.value) && !is_decisive(ttData.value)
+            if (canUseTTPruning && is_valid(ttData.value) && !is_decisive(ttData.value)
                 && (ttData.bound & (ttData.value > bestValue ? BOUND_LOWER : BOUND_UPPER)))
                 bestValue = ttData.value;
         }
@@ -1542,20 +1789,43 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     // Initialize a MovePicker object for the current position, and prepare to search
     // the moves. We presently use two stages of move generator in quiescence search:
     // captures, or evasions only when in check.
-    MovePicker mp(pos, ttData.move, DEPTH_QS, &thisThread->mainHistory, &thisThread->lowPlyHistory,
-                  &thisThread->captureHistory, contHist, &thisThread->pawnHistory, ss->ply);
+    const Reveal::OrderingParameters ordering{revealParameters.moveOrder,
+                                               revealParameters.quietMoveOrder,
+                                               revealParameters.pruningMargin};
+    const bool tunedMovePicker = UseReveal
+                              && (ordering.darkMoveOrder != 0 || ordering.quietMoveOrder != 0
+                                  || ordering.pruningMargin != 0);
+    MovePicker mp =
+      tunedMovePicker
+        ? MovePicker(pos, ttData.move, DEPTH_QS, &thisThread->mainHistory,
+                      &thisThread->lowPlyHistory, &thisThread->captureHistory, contHist,
+                      &thisThread->pawnHistory, ss->ply, ordering)
+        : MovePicker(pos, ttData.move, DEPTH_QS, &thisThread->mainHistory,
+                     &thisThread->lowPlyHistory, &thisThread->captureHistory, contHist,
+                     &thisThread->pawnHistory, ss->ply);
 
     // Step 5. Loop through all pseudo-legal moves until no moves remain or a beta
     // cutoff occurs.
-    while ((move = mp.next_move()) != Move::none())
+    while ((move = tunedMovePicker ? mp.next_reveal_move(false, false)
+                                   : mp.next_move())
+           != Move::none())
     {
+        if (threads.stop.load(std::memory_order_relaxed))
+            return VALUE_ZERO;
         assert(move.is_ok());
 
         if (!pos.legal(move))
             continue;
 
-        givesCheck = pos.gives_check(move);
         capture    = pos.capture(move);
+        revealMove = UseReveal && pos.move_dark(move);
+        const Reveal::QuietMoveContext quietContext = Reveal::quiet_move_context(
+          pos, move,
+          Reveal::qsearch_quiet_context_enabled(UseReveal, ss->inCheck, quietSafetyNeeded));
+        assert(!quietContext.eligible || (revealMove && !capture));
+        if (useSkyrule && !capture && !pos.move_dark(move) && pos.forbidden_by_skyrule_jieqi(move))
+            continue;
+        givesCheck = pos.gives_check(move);
 
         moveCount++;
 
@@ -1565,10 +1835,24 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
             // Futility pruning and moveCount pruning
             if (!givesCheck && move.to_sq() != prevSq && !is_loss(futilityBase))
             {
-                if (moveCount > 2)
-                    continue;
+                if constexpr (!UseReveal)
+                {
+                    if (moveCount > 2)
+                        continue;
+                }
+                else
+                {
+                    if (revealParameters.pruningMargin == 0)
+                    {
+                        if (moveCount > 2)
+                            continue;
+                    }
+                    else if (moveCount > 2 + (revealMove ? revealPruningSlots : 0))
+                        continue;
+                }
 
-                Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())];
+                Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())]
+                                    + (revealMove ? revealParameters.pruningMargin : 0);
 
                 // If static eval + value of piece we are going to capture is
                 // much lower than alpha, we can prune this move.
@@ -1580,7 +1864,8 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
 
                 // If static exchange evaluation is low enough
                 // we can prune this move.
-                if (!pos.see_ge(move, alpha - futilityBase))
+                if (!pos.see_ge(move, alpha - futilityBase
+                                        - (revealMove ? revealParameters.pruningMargin : 0)))
                 {
                     bestValue = std::min(alpha, futilityBase);
                     continue;
@@ -1592,17 +1877,20 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
                 && (*contHist[0])[pos.moved_piece(move)][move.to_sq()]
                        + thisThread->pawnHistory[pawn_structure_index(pos)][pos.moved_piece(move)]
                                                 [move.to_sq()]
-                     <= 2861)
+                     <= 2861 - (revealMove ? 8 * revealParameters.pruningMargin : 0))
                 continue;
 
             // Do not search moves with bad enough SEE values
-            if (!pos.see_ge(move, -114))
+            if (!pos.see_ge(move, -114 - (revealMove ? revealParameters.pruningMargin : 0)))
                 continue;
         }
 
         // Step 7. Make and search the move
-        Piece movedPiece = pos.moved_piece(move);
+        Piece     movedPiece      = pos.moved_piece(move);
+        const int moveRevealBonus =
+          revealMove ? reveal_bonus(pos, quietContext, unadjustedStaticEval) : 0;
 
+        ss->capturedDark = capture && pos.is_dark(move.to_sq());
         do_move(pos, move, st, givesCheck);
 
         // Update the current move
@@ -1612,8 +1900,13 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         ss->continuationCorrectionHistory =
           &thisThread->continuationCorrectionHistory[movedPiece][move.to_sq()];
 
-        value = -qsearch<nodeType>(pos, ss + 1, -beta, -alpha);
+        value = moveRevealBonus == 0
+                ? -hidden_capture_search<nodeType, UseReveal>(pos, ss + 1, -beta, -alpha)
+                : reveal_search<nodeType, UseReveal>(pos, ss + 1, alpha, beta, moveRevealBonus);
         undo_move(pos, move);
+
+        if (threads.stop.load(std::memory_order_relaxed))
+            return VALUE_ZERO;
 
         assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
 
@@ -1666,88 +1959,250 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
 }
 
 
-template<NodeType nodeType>
-Value Search::Worker::flip_search(
-    Position& pos, Stack* ss, Value alpha, Value beta, bool isQsearch, Depth depth, bool cutNode) {
-    constexpr double scaling          = 360.83524;
-    constexpr auto   score_to_winrate = [&](Value v) { return 1.0 / (1.0 + exp(-v / scaling)); };
-    constexpr auto   winrate_to_score = [&](double winrate) {
-        constexpr double epsilon = 1e-9;
-        winrate                  = std::clamp(winrate, epsilon, 1.0 - epsilon);
-        double q                 = log(winrate / (1.0 - winrate));
-        return std::clamp(static_cast<Value>(q * scaling), VALUE_MATED_IN_MAX_PLY + 1,
-                            VALUE_MATE_IN_MAX_PLY - 1);
-    };
+template<NodeType nodeType, bool UseReveal>
+Value Search::Worker::reveal_search(Position& pos,
+                                    Stack*    ss,
+                                    Value     alpha,
+                                    Value     beta,
+                                    int       revealBonus,
+                                    bool      isQsearch,
+                                    Depth     depth,
+                                    bool      cutNode) {
+    // Keep the untuned/default hot path identical to the original negamax
+    // call. Besides avoiding needless inverse-window arithmetic, this matters
+    // for time-control strength when all reveal-reward weights are zero.
+    if (revealBonus == 0)
+        return -hidden_capture_search<nodeType, UseReveal>(pos, ss, -beta, -alpha, isQsearch,
+                                                            depth, cutNode);
 
-    auto restPieces = pos.rest_pieces(~pos.side_to_move());
-    int  total = 0;
-    for (const auto& [piece, num] : restPieces)
+    return Reveal::search_with_bonus(
+      alpha, beta, revealBonus, [&](Value childAlpha, Value childBeta) {
+          return hidden_capture_search<nodeType, UseReveal>(pos, ss, childAlpha, childBeta,
+                                                             isQsearch, depth, cutNode);
+      });
+}
+
+
+template<NodeType nodeType, bool UseReveal>
+Value Search::Worker::hidden_capture_search(
+  Position& pos, Stack* ss, Value alpha, Value beta, bool isQsearch, Depth depth, bool cutNode) {
+    Position::RestPieceList restPieces;
+    const int               restPieceCount =
+      hidden_capture_candidates(pos, rootObserver, (ss - 1)->capturedDark, restPieces);
+
+    if (restPieceCount == 0)
+        return isQsearch ? qsearch<nodeType, UseReveal>(pos, ss, alpha, beta)
+                         : search<nodeType, UseReveal>(pos, ss, alpha, beta, depth, cutNode);
+
+    DirtyPiece dp = accumulatorStack.latest_dirty_piece();
+    ChanceBranchReduction branchReduction((ss - 1)->reduction);
+
+    if (restPieceCount == 1)
+    {
+        const Piece piece = restPieces[0].first;
+        branchReduction.restore();
+
+        accumulatorStack.pop();
+        pos.remove_rest_piece(piece);
+        accumulatorStack.push(dp, pos);
+
+        const Value value =
+          isQsearch ? qsearch<nodeType, UseReveal>(pos, ss, alpha, beta)
+                    : search<nodeType, UseReveal>(pos, ss, alpha, beta, depth, cutNode);
+
+        pos.restore_rest_piece(piece);
+        return value;
+    }
+
+    int                              total        = 0;
+    bool                             allDecisive  = true;
+    Value                            bestWinMate  = VALUE_MATE;
+    Value                            bestLossMate = -VALUE_MATE;
+    std::vector<std::pair<int, int>> probabilitySamples;
+    probabilitySamples.reserve(restPieceCount);
+
+    for (int i = 0; i < restPieceCount; ++i)
+    {
+        const auto [piece, count] = restPieces[i];
+        total += count;
+        branchReduction.restore();
+
+        accumulatorStack.pop();
+        pos.remove_rest_piece(piece);
+        accumulatorStack.push(dp, pos);
+
+        const Value value =
+          isQsearch ? qsearch<nodeType, UseReveal>(pos, ss, alpha, beta)
+                    : search<nodeType, UseReveal>(pos, ss, alpha, beta, depth, cutNode);
+
+        pos.restore_rest_piece(piece);
+
+        if (threads.stop.load(std::memory_order_relaxed))
+            return VALUE_ZERO;
+
+        if (is_decisive(value))
+        {
+            if (is_win(value))
+                bestWinMate = std::min(bestWinMate, value);
+            else if (is_loss(value))
+                bestLossMate = std::max(bestLossMate, value);
+        }
+        else
+            allDecisive = false;
+
+        probabilitySamples.emplace_back(-int(value), count);
+    }
+
+    const auto& model = networks[numaAccessToken].big.model();
+    if (model.probability_complete())
+    {
+        const auto parentAggregate =
+          model.aggregate_probability(probabilitySamples, configured_aggressive_level(options));
+        return Value(-parentAggregate);
+    }
+
+    if (allDecisive)
+    {
+        if (bestWinMate != VALUE_MATE)
+            return bestWinMate;
+        return bestLossMate;
+    }
+
+    double winrateSum = 0.0;
+    for (const auto& [parentValue, count] : probabilitySamples)
+        winrateSum += flip_score_to_winrate(Value(-parentValue)) * count;
+
+    return flip_winrate_to_score(winrateSum / total);
+}
+
+
+template<NodeType nodeType, bool UseReveal>
+Value Search::Worker::flip_search(
+  Position& pos, Stack* ss, Value alpha, Value beta, bool isQsearch, Depth depth, bool cutNode) {
+    const Color flipColor = ~pos.side_to_move();
+
+    Position::RestPieceList restPieces;
+    const int               restPieceCount = pos.rest_pieces(flipColor, restPieces);
+
+    int total = 0;
+    for (int i = 0; i < restPieceCount; ++i)
+    {
+        const auto& [piece, num] = restPieces[i];
         total += num;
+    }
 
     assert(total != 0);
 
-    DirtyPiece dp = accumulatorStack.latest().dirtyPiece;
+    if (restPieceCount == 0)
+        return VALUE_DRAW;
 
-    // Collect per-flip results
-    struct Entry { Value value; int count; };
-    std::vector<Entry> results;
-    results.reserve(restPieces.size());
+    auto better_flip_branch = [](const auto& lhs, const auto& rhs) {
+        if (lhs.second != rhs.second)
+            return lhs.second > rhs.second;
 
-    for (auto& [piece, num] : restPieces) {
+        return PieceValue[lhs.first] > PieceValue[rhs.first];
+    };
+
+    for (int i = 1; i < restPieceCount; ++i)
+    {
+        auto branch = restPieces[i];
+        int  j      = i;
+        while (j > 0 && better_flip_branch(branch, restPieces[j - 1]))
+        {
+            restPieces[j] = restPieces[j - 1];
+            --j;
+        }
+        restPieces[j] = branch;
+    }
+
+    const Square flipSq = (ss - 1)->currentMove.to_sq();
+    DirtyPiece   dp     = accumulatorStack.latest_dirty_piece();
+    ChanceBranchReduction branchReduction((ss - 1)->reduction);
+
+    if (restPieceCount == 1)
+    {
+        Piece piece = restPieces[0].first;
+        branchReduction.restore();
+
         accumulatorStack.pop();
-        Piece flipped_piece = pos.do_flip((ss - 1)->currentMove.to_sq(), piece, &dp, &tt);
-        accumulatorStack.push(dp);
+        Piece flipped_piece = pos.do_flip(flipSq, piece, &dp, &tt);
+        accumulatorStack.push(dp, pos);
 
         Value value;
 
         if (isQsearch)
-            value = qsearch<nodeType>(pos, ss, alpha, beta);
+            value = qsearch<nodeType, UseReveal>(pos, ss, alpha, beta);
         else
-            value = search<nodeType>(pos, ss, alpha, beta, depth, cutNode);
+            value = search<nodeType, UseReveal>(pos, ss, alpha, beta, depth, cutNode);
 
-        pos.undo_flip((ss - 1)->currentMove.to_sq(), flipped_piece);
-
-        if (std::size(restPieces) == 1)
-            return value;
-
-        results.push_back({value, num});
+        pos.undo_flip(flipSq, flipped_piece);
+        return value;
     }
 
-    bool all_decisive = true;
-    for (const auto& e : results) {
-        if (!is_decisive(e.value)) {
+    bool                             all_decisive   = true;
+    Value                            best_win_mate  = VALUE_MATE;
+    Value                            best_loss_mate = -VALUE_MATE;
+    std::vector<std::pair<int, int>> probabilitySamples;
+    probabilitySamples.reserve(restPieceCount);
+
+    for (int i = 0; i < restPieceCount; ++i)
+    {
+        auto& [piece, num] = restPieces[i];
+        branchReduction.restore();
+        accumulatorStack.pop();
+        Piece flipped_piece = pos.do_flip(flipSq, piece, &dp, &tt);
+        accumulatorStack.push(dp, pos);
+
+        Value value;
+
+        if (isQsearch)
+            value = qsearch<nodeType, UseReveal>(pos, ss, alpha, beta);
+        else
+            value = search<nodeType, UseReveal>(pos, ss, alpha, beta,
+                                                chance_branch_depth(depth, i), cutNode);
+
+        pos.undo_flip(flipSq, flipped_piece);
+
+        if (threads.stop.load(std::memory_order_relaxed))
+            return VALUE_ZERO;
+
+        if (is_decisive(value))
+        {
+            if (is_win(value))
+                best_win_mate = std::min(best_win_mate, value);
+            else if (is_loss(value))
+                best_loss_mate = std::max(best_loss_mate, value);
+        }
+        else
             all_decisive = false;
-            break;
-        }
+
+        // The child search reports the child side's score. Convert every
+        // sample to the parent perspective before applying the non-linear
+        // score/mass lookup tables.
+        probabilitySamples.emplace_back(-int(value), num);
     }
 
-    if (all_decisive) {
-        Value best_win_mate  = VALUE_MATE;
-        Value best_loss_mate = -VALUE_MATE;
+    const auto& model = networks[numaAccessToken].big.model();
+    if (model.probability_complete())
+    {
+        const auto parentAggregate =
+          model.aggregate_probability(probabilitySamples, configured_aggressive_level(options));
+        return Value(-parentAggregate);
+    }
 
-        for (const auto& e : results) {
-            Value v = e.value;
-            if (is_win(v)) {
-                if (v < best_win_mate)
-                    best_win_mate = v;
-            } else if (is_loss(v)) {
-                if (v > best_loss_mate)
-                    best_loss_mate = v;
-            }
-        }
-
+    if (all_decisive)
+    {
         if (best_win_mate != VALUE_MATE)
             return best_win_mate;
         else
             return best_loss_mate;
     }
 
-    double winrate_sum = 0.0;
-    for (const auto& e : results)
-        winrate_sum += score_to_winrate(e.value) * e.count;
-
-    double expectedWinrate = winrate_sum / total;
-    return winrate_to_score(expectedWinrate);
+    double winrateSum = 0.0;
+    for (const auto& [parentValue, count] : probabilitySamples)
+        winrateSum += flip_score_to_winrate(Value(-parentValue)) * count;
+    double expectedWinrate = winrateSum / total;
+    return flip_winrate_to_score(expectedWinrate);
 }
 
 
@@ -1773,6 +2228,33 @@ TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elaps
 Value Search::Worker::evaluate(const Position& pos) {
     return Eval::evaluate(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
                           optimism[pos.side_to_move()]);
+}
+
+Value Search::Worker::evaluate_for_reveal(const Position& pos) {
+    return Eval::evaluate_for_reveal(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
+                                     optimism[pos.side_to_move()]);
+}
+
+int Search::Worker::reveal_bonus(const Position&                 pos,
+                                 const Reveal::QuietMoveContext& quietContext,
+                                 Value&                          rawParentEval) {
+    const bool useV1 = Reveal::bonus_enabled(revealParameters);
+    const bool useV2 = quietContext.eligible && Reveal::quiet_bonus_enabled(revealParameters);
+    if (!useV1 && !useV2)
+        return 0;
+
+    if (Reveal::raw_eval_needed(revealParameters, quietContext) && !is_valid(rawParentEval))
+        rawParentEval = evaluate_for_reveal(pos);
+
+    const Value featureEval = is_valid(rawParentEval) ? rawParentEval : VALUE_ZERO;
+    const int   v1 = useV1 ? Reveal::bonus(revealParameters,
+                                         Reveal::make_features(pos, featureEval))
+                           : 0;
+    const int v2 = useV2 ? Reveal::quiet_bonus(
+                             revealParameters,
+                             Reveal::make_quiet_features(pos, quietContext.safety, featureEval))
+                         : 0;
+    return Reveal::combine_bonus(v1, v2, quietContext.eligible);
 }
 
 namespace {
@@ -1908,7 +2390,10 @@ void SearchManager::check_time(Search::Worker& worker) {
         return;
 
     // When using nodes, ensure checking rate is not lower than 0.1% of nodes
-    callsCnt = worker.limits.nodes ? std::min(512, int(worker.limits.nodes / 1024)) : 512;
+    // Check often enough for the one-second fixed movetime used by the
+    // tuning harness.  The old 512-node interval was too coarse in reveal and
+    // qsearch-heavy positions and produced 300-700 ms overruns.
+    callsCnt = worker.limits.nodes ? std::min(64, std::max(1, int(worker.limits.nodes / 1024))) : 64;
 
     static TimePoint lastInfoTime = now();
 
@@ -1928,8 +2413,7 @@ void SearchManager::check_time(Search::Worker& worker) {
     if (
       // Later we rely on the fact that we can at least use the mainthread previous
       // root-search score and PV in a multithreaded environment to prove mated-in scores.
-      worker.completedDepth >= 1
-      && ((worker.limits.use_time_management() && (elapsed > tm.maximum() || stopOnPonderhit))
+      ((worker.limits.use_time_management() && (elapsed > tm.maximum() || stopOnPonderhit))
           || (worker.limits.movetime && elapsed >= worker.limits.movetime)
           || (worker.limits.nodes && worker.threads.nodes_searched() >= worker.limits.nodes)))
         worker.threads.stop = worker.threads.abortedSearch = true;
@@ -1960,20 +2444,23 @@ void SearchManager::pv(const Search::Worker&     worker,
             v = VALUE_ZERO;
 
         std::string pv;
-        Position tempPos;
-        StateInfo st;
-        tempPos.set(pos, &st);
-        
+        Position    tempPos;
+        // Position retains a pointer to its current state. Keep every state
+        // alive for the full PV walk so a later move cannot alias tempPos.st.
+        std::deque<StateInfo> pvStates;
+        pvStates.emplace_back();
+        tempPos.set(pos, &pvStates.back());
+
         for (Move m : rootMoves[i].pv)
         {
             pv += UCIEngine::move(m);
-            
+
             if (tempPos.move_dark(m))
                 break;
-            
-            StateInfo moveSt;
-            tempPos.do_move(m, moveSt);
-            
+
+            pvStates.emplace_back();
+            tempPos.do_move(m, pvStates.back());
+
             pv += " ";
         }
 
@@ -2013,7 +2500,9 @@ void SearchManager::pv(const Search::Worker&     worker,
 // for instance, in case we stop the search during a fail high at root.
 // We try hard to have a ponder move to return to the GUI,
 // otherwise in case of 'ponder on' we have nothing to think about.
-bool RootMove::extract_ponder_from_tt(const TranspositionTable& tt, Position& pos) {
+bool RootMove::extract_ponder_from_tt(const TranspositionTable& tt,
+                                      Position&                 pos,
+                                      Color                     rootObserver) {
 
     StateInfo st;
 
@@ -2023,7 +2512,7 @@ bool RootMove::extract_ponder_from_tt(const TranspositionTable& tt, Position& po
 
     pos.do_move(pv[0], st, &tt);
 
-    auto [ttHit, ttData, ttWriter] = tt.probe(pos.key());
+    auto [ttHit, ttData, ttWriter] = tt.probe(observer_tt_key(pos.key(), rootObserver));
     if (ttHit)
     {
         if (MoveList<LEGAL>(pos).contains(ttData.move))

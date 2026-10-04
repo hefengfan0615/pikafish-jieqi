@@ -21,6 +21,7 @@
 
 #include "history.h"
 #include "movegen.h"
+#include "reveal.h"
 #include "types.h"
 
 namespace Stockfish {
@@ -47,15 +48,33 @@ class MovePicker {
                const PieceToHistory**,
                const PawnHistory*,
                int);
+    MovePicker(const Position&,
+               Move,
+               Depth,
+               const ButterflyHistory*,
+               const LowPlyHistory*,
+               const CapturePieceToHistory*,
+               const PieceToHistory**,
+               const PawnHistory*,
+               int,
+               Reveal::OrderingParameters);
     MovePicker(const Position&, Move, int, const CapturePieceToHistory*);
+    MovePicker(const Position&,
+               Move,
+               int,
+               const CapturePieceToHistory*,
+               Reveal::OrderingParameters);
     Move next_move();
+    Move next_reveal_move(bool keepDarkQuiets, bool skipDarkQuiets);
     void skip_quiet_moves();
 
    private:
     template<typename Pred>
     Move select(Pred);
-    template<GenType>
-    void     score();
+    template<GenType T>
+    ExtMove* score(const MoveList<T>&);
+    template<GenType T>
+    ExtMove* reveal_score(const MoveList<T>&);
     ExtMove* begin() { return cur; }
     ExtMove* end() { return endCur; }
 
@@ -71,6 +90,7 @@ class MovePicker {
     int                          threshold;
     Depth                        depth;
     int                          ply;
+    Reveal::OrderingParameters   ordering{};
     bool                         skipQuiets = false;
     ExtMove                      moves[MAX_MOVES];
 };

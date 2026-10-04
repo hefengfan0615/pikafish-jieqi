@@ -1,11 +1,11 @@
 /*
-  Pikafish, a UCI chess variant playing engine derived from Stockfish
-  Copyright (C) 2018-2022 PikaCat++
-  Pikafish is free software: you can redistribute it and/or modify
+  AB-JChess, a UCI jieqi engine
+  Copyright (C) 2026 AB-JChess contributors
+  AB-JChess is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
-  Pikafish is distributed in the hope that it will be useful,
+  AB-JChess is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.

@@ -32,10 +32,10 @@
 
 #include "history.h"
 #include "misc.h"
-#include "nnue/network.h"
-#include "nnue/nnue_accumulator.h"
+#include "abjnnue/abjnnue_network.h"
 #include "numa.h"
 #include "position.h"
+#include "reveal.h"
 #include "score.h"
 #include "timeman.h"
 #include "types.h"
@@ -55,6 +55,9 @@ class OptionsMap;
 
 namespace Search {
 
+// Read all reveal UCI options once at search start so node hot paths only use POD data.
+Reveal::Parameters snapshot_reveal_parameters(const OptionsMap& options);
+
 // Stack struct keeps track of the information we need to remember from nodes
 // shallower and deeper in the tree during the search. Each search thread has
 // its own array of Stack objects, indexed by the current ply.
@@ -64,6 +67,7 @@ struct Stack {
     CorrectionHistory<PieceTo>* continuationCorrectionHistory;
     int                         ply;
     Move                        currentMove;
+    bool                        capturedDark;
     Move                        excludedMove;
     Value                       staticEval;
     int                         statScore;
@@ -84,8 +88,8 @@ struct Stack {
 struct RootMove {
 
     explicit RootMove(Move m) :
-        pv(1, m) {}
-    bool extract_ponder_from_tt(const TranspositionTable& tt, Position& pos);
+        pv(1, m) { }
+    bool extract_ponder_from_tt(const TranspositionTable& tt, Position& pos, Color rootObserver);
     bool operator==(const Move& m) const { return pv[0] == m; }
     // Sort in descending order
     bool operator<(const RootMove& m) const {
@@ -105,6 +109,40 @@ struct RootMove {
 };
 
 using RootMoves = std::vector<RootMove>;
+
+Key observer_tt_key(Key positionKey, Color rootObserver);
+
+int hidden_capture_candidates(const Position&,
+                              Color rootObserver,
+                              bool  capturedDark,
+                              Position::RestPieceList&);
+
+struct ProbCutContext {
+    Value beta;
+    Depth depth;
+};
+
+Depth          chance_branch_depth(Depth depth, int branchIndex);
+ProbCutContext probcut_context(Value probCutBeta, Depth nodeDepth, bool capturedDark);
+
+class ChanceBranchReduction {
+   public:
+    explicit ChanceBranchReduction(int& reduction) :
+        reduction(reduction), parentReduction(reduction) { }
+
+    ~ChanceBranchReduction() { reduction = 0; }
+
+    void restore() const { reduction = parentReduction; }
+
+    ChanceBranchReduction(const ChanceBranchReduction&)            = delete;
+    ChanceBranchReduction(ChanceBranchReduction&&)                 = delete;
+    ChanceBranchReduction& operator=(const ChanceBranchReduction&) = delete;
+    ChanceBranchReduction& operator=(ChanceBranchReduction&&)      = delete;
+
+   private:
+    int&      reduction;
+    const int parentReduction;
+};
 
 
 // LimitsType struct stores information sent by the caller about the analysis required.
@@ -138,7 +176,7 @@ struct SharedState {
         options(optionsMap),
         threads(threadPool),
         tt(transpositionTable),
-        networks(nets) {}
+        networks(nets) { }
 
     const OptionsMap&                               options;
     ThreadPool&                                     threads;
@@ -152,7 +190,7 @@ class Worker;
 // A Null Object will be given to non-mainthread workers.
 class ISearchManager {
    public:
-    virtual ~ISearchManager() {}
+    virtual ~ISearchManager() { }
     virtual void check_time(Search::Worker&) = 0;
 };
 
@@ -198,7 +236,7 @@ class SearchManager: public ISearchManager {
 
 
     SearchManager(const UpdateContext& updateContext) :
-        updates(updateContext) {}
+        updates(updateContext) { }
 
     void check_time(Search::Worker& worker) override;
 
@@ -225,7 +263,7 @@ class SearchManager: public ISearchManager {
 
 class NullSearchManager: public ISearchManager {
    public:
-    void check_time(Search::Worker&) override {}
+    void check_time(Search::Worker&) override { }
 };
 
 
@@ -265,6 +303,8 @@ class Worker {
 
    private:
     void iterative_deepening();
+    void refresh_chasing_rule();
+    void reset_correction_histories();
 
     void do_move(Position& pos, const Move move, StateInfo& st);
     void do_move(Position& pos, const Move move, StateInfo& st, const bool givesCheck);
@@ -273,15 +313,37 @@ class Worker {
     void undo_null_move(Position& pos);
 
     // This is the main search function, for both PV and non-PV nodes
-    template<NodeType nodeType>
+    template<NodeType nodeType, bool UseReveal>
     Value search(Position& pos, Stack* ss, Value alpha, Value beta, Depth depth, bool cutNode);
 
     // Quiescence search function, which is called by the main search
-    template<NodeType nodeType>
+    template<NodeType nodeType, bool UseReveal>
     Value qsearch(Position& pos, Stack* ss, Value alpha, Value beta);
 
+    // Resolve the captured identity when the root observer captured a dark piece.
+    template<NodeType nodeType, bool UseReveal>
+    Value hidden_capture_search(Position&              pos,
+                                Stack*                 ss,
+                                Value                  alpha,
+                                Value                  beta,
+                                bool                   isQsearch = true,
+                                [[maybe_unused]] Depth depth     = -1,
+                                [[maybe_unused]] bool  cutNode   = false);
+
+    // Search a parent move through the complete hidden-capture identity aggregate,
+    // then apply its reveal reward exactly once.
+    template<NodeType nodeType, bool UseReveal>
+    Value reveal_search(Position&              pos,
+                        Stack*                 ss,
+                        Value                  alpha,
+                        Value                  beta,
+                        int                    revealBonus,
+                        bool                   isQsearch = true,
+                        [[maybe_unused]] Depth depth     = -1,
+                        [[maybe_unused]] bool  cutNode   = false);
+
     // This is the flip search function for any nodes
-    template<NodeType nodeType>
+    template<NodeType nodeType, bool UseReveal>
     Value flip_search(Position&              pos,
                       Stack*                 ss,
                       Value                  alpha,
@@ -302,6 +364,10 @@ class Worker {
     TimePoint elapsed_time() const;
 
     Value evaluate(const Position&);
+    Value evaluate_for_reveal(const Position&);
+    int   reveal_bonus(const Position&,
+                       const Reveal::QuietMoveContext& quietContext,
+                       Value&                          rawParentEval);
 
     LimitsType limits;
 
@@ -311,11 +377,20 @@ class Worker {
 
     Value optimism[COLOR_NB];
 
-    Position  rootPos;
-    StateInfo rootState;
-    RootMoves rootMoves;
-    Depth     rootDepth, completedDepth;
-    Value     rootDelta;
+    Position    rootPos;
+    Color       rootObserver = WHITE;
+    StateInfo   rootState;
+    RootMoves   rootMoves;
+    Depth       rootDepth, completedDepth;
+    Value       rootDelta;
+    ChasingRule searchRule = CHASING_RULE_GITHUB;
+    bool        useSkyrule = false;
+
+    Reveal::Parameters revealParameters;
+    int                revealPruningSlots = 0;
+    bool               quietRewardEnabled = false;
+    bool               quietSafetyNeeded  = false;
+    bool               revealSearchTuning = false;
 
     size_t                    threadIdx;
     NumaReplicatedAccessToken numaAccessToken;

@@ -33,15 +33,37 @@
 #include <sstream>
 #include <string_view>
 
+#ifdef _WIN32
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#else
+    #include <unistd.h>
+#endif
+
 #include "types.h"
-#include "external/zstd.h"
 
 namespace Stockfish {
 
 namespace {
 
+#ifdef _WIN32
+std::string utf8_from_wide(const std::wstring& value) {
+    const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                                           int(value.size()), nullptr, 0, nullptr, nullptr);
+    if (length <= 0)
+        return {};
+    std::string result(std::size_t(length), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), int(value.size()),
+                            result.data(), length, nullptr, nullptr) != length)
+        return {};
+    return result;
+}
+#endif
+
 // Version number or dev.
-constexpr std::string_view version = "dev";
+constexpr std::string_view version = "0.2b";
 
 // Our fancy logging facility. The trick here is to replace cin.rdbuf() and
 // cout.rdbuf() with two Tie objects that tie cin and cout to a file stream. We
@@ -114,20 +136,20 @@ class Logger {
 }  // namespace
 
 
-// Returns the full name of the current Pikafish version.
+// Returns the full name of the current AB-JChess version.
 //
 // For local dev compiles we try to append the commit SHA and
 // commit date from git. If that fails only the local compilation
 // date is set and "nogit" is specified:
-//      Pikafish dev-YYYYMMDD-SHA
+//      AB-JChess dev-YYYYMMDD-SHA
 //      or
-//      Pikafish dev-YYYYMMDD-nogit
+//      AB-JChess dev-YYYYMMDD-nogit
 //
 // For releases (non-dev builds) we only include the version number:
-//      Pikafish version
+//      AB-JChess version
 std::string engine_version_info() {
     std::stringstream ss;
-    ss << "Pikafish " << version << std::setfill('0');
+    ss << "AB JChess " << version << std::setfill('0');
 
     if constexpr (version == "dev")
     {
@@ -158,8 +180,11 @@ std::string engine_version_info() {
 }
 
 std::string engine_info(bool to_uci) {
-    return engine_version_info() + (to_uci ? "\nid author " : " by ")
-         + "the Pikafish developers (see AUTHORS file)";
+    if (to_uci)
+        return engine_version_info() + "\nid author Huorongrong,Laoxu(Kouza)";
+
+    return engine_version_info() + " by Huorongrong,Laoxu(Kouza)\n"
+         + "AB JChess is free of charge. Resale is prohibited.";
 }
 
 
@@ -450,14 +475,6 @@ void prefetch(const void* addr) {
 
 #endif
 
-#ifdef _WIN32
-    #include <direct.h>
-    #define GETCWD _getcwd
-#else
-    #include <unistd.h>
-    #define GETCWD getcwd
-#endif
-
 size_t str_to_size_t(const std::string& s) {
     unsigned long long value = std::stoull(s);
     if (value > std::numeric_limits<size_t>::max())
@@ -485,13 +502,28 @@ std::string CommandLine::get_binary_directory(std::string argv0) {
 
 #ifdef _WIN32
     pathSeparator = "\\";
-    #ifdef _MSC_VER
-    // Under windows argv[0] may not have the extension. Also _get_pgmptr() had
-    // issues in some Windows 10 versions, so check returned values carefully.
-    char* pgmptr = nullptr;
-    if (!_get_pgmptr(&pgmptr) && pgmptr != nullptr && *pgmptr)
-        argv0 = pgmptr;
-    #endif
+    DWORD consoleMode;
+    if (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &consoleMode)
+        || GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &consoleMode))
+        SetConsoleOutputCP(CP_UTF8);
+
+    // argv[0] uses the active code page and can lose characters in the executable path.
+    std::wstring modulePath(1024, L'\0');
+    for (;;)
+    {
+        const DWORD length = GetModuleFileNameW(nullptr, modulePath.data(), DWORD(modulePath.size()));
+        if (!length)
+            break;
+        if (length < modulePath.size())
+        {
+            modulePath.resize(length);
+            const auto utf8Path = utf8_from_wide(modulePath);
+            if (!utf8Path.empty())
+                argv0 = utf8Path;
+            break;
+        }
+        modulePath.resize(modulePath.size() * 2);
+    }
 #else
     pathSeparator = "/";
 #endif
@@ -515,48 +547,27 @@ std::string CommandLine::get_binary_directory(std::string argv0) {
 }
 
 std::string CommandLine::get_working_directory() {
+#ifdef _WIN32
+    const DWORD length = GetCurrentDirectoryW(0, nullptr);
+    if (!length)
+        return {};
+    std::wstring directory(length, L'\0');
+    const DWORD actualLength = GetCurrentDirectoryW(length, directory.data());
+    if (!actualLength || actualLength >= length)
+        return {};
+    directory.resize(actualLength);
+    return utf8_from_wide(directory);
+#else
     std::string workingDirectory = "";
     char        buff[40000];
-    char*       cwd = GETCWD(buff, 40000);
+    char*       cwd = getcwd(buff, 40000);
     if (cwd)
         workingDirectory = cwd;
 
     return workingDirectory;
-}
-
-std::stringstream read_compressed_nnue(const std::string& fpath) {
-    std::stringstream ss;
-
-    std::ifstream fin(fpath, std::ios::binary);
-    if (!fin)
-        return ss;
-    std::vector<char> buffIn(ZSTD_DStreamInSize()), buffOut(ZSTD_DStreamOutSize());
-    ZSTD_DCtx* const  dctx = ZSTD_createDCtx();
-    if (!dctx)
-        return ss;
-
-    while (fin.read(buffIn.data(), buffIn.size()) || fin.gcount() > 0)
-    {
-        size_t        read  = static_cast<size_t>(fin.gcount());
-        ZSTD_inBuffer input = {buffIn.data(), read, 0};
-
-        while (input.pos < input.size)
-        {
-            ZSTD_outBuffer output = {buffOut.data(), buffOut.size(), 0};
-            size_t const   ret    = ZSTD_decompressStream(dctx, &output, &input);
-            if (ZSTD_isError(ret))
-            {
-                ZSTD_freeDCtx(dctx);
-                return ss;
-            }
-
-            ss.write(buffOut.data(), output.pos);
-        }
-    }
-
-    ZSTD_freeDCtx(dctx);
-
-    return ss;
+#endif
 }
 
 }  // namespace Stockfish
+
+
