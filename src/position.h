@@ -39,6 +39,19 @@ class TranspositionTable;
 // its previous state when we retract a move. Whenever a move is made on the
 // board (by calling Position::do_move), a StateInfo object must be passed.
 
+// Dark (hidden) piece flip-search budget, ported from the official-pikafish
+// Pikafish jieqi_old branch: when many hidden (暗棋) pieces are on the board,
+// every dark move spawns a flip_search over all remaining flip types at full
+// depth, which explodes exponentially along chains of dark moves and makes the
+// search depth rise very slowly. The budget below caps that branching:
+//   - MAXDARKDEPTH / MAXDARKTYPES  (soft cap): beyond it, flip variants are
+//     searched at depth 0 (leaf) instead of full depth.
+//   - QDARKDEPTH (hard cap): when the chain is too deep, the dark move is
+//     evaluated statically instead of iterating all flips.
+constexpr int MAXDARKDEPTH = 4;   // soft cap on consecutive dark plies
+constexpr int MAXDARKTYPES = 43;  // soft cap on cumulative flip branching factor
+constexpr int QDARKDEPTH   = 1;   // hard cap: darkDepth - MAXDARKDEPTH > QDARKDEPTH
+
 struct StateInfo {
 
     // Copied when making a move
@@ -48,6 +61,8 @@ struct StateInfo {
     Value majorMaterial[COLOR_NB];
     int   rule40;
     int   pliesFromNull;
+    int   darkDepth;  // dark moves made along the current line (never reset, like jieqi_old)
+    int   darkTypes;  // cumulative flip branching factor (product of distinct flip types)
 
     // Not copied when making a move (will be recomputed anyhow)
     Key        key;

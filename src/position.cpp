@@ -247,6 +247,8 @@ void Position::set_state() const {
     st->majorMaterial[WHITE] = st->majorMaterial[BLACK] = VALUE_ZERO;
     st->checkersBB = checkers_to(~sideToMove, king_square(sideToMove));
     st->move       = Move::none();
+    st->darkDepth  = 0;
+    st->darkTypes  = 1;
 
     set_check_info();
 
@@ -703,6 +705,21 @@ DirtyPiece Position::do_move(Move                      m,
         set_check_info();
     else
         byTypeBB[DARK] ^= from | to;
+
+    // Update the dark (hidden piece) flip-search budget, following jieqi_old:
+    // darkDepth counts every dark move made along the line, darkTypes is the
+    // cumulative branching factor of the flip searches. This bounds the
+    // exponential explosion of flip_search chains when many hidden pieces exist.
+    if (moveDark)
+    {
+        ++st->darkDepth;
+        int flipTypes = 0;
+        const PieceType flipOrder[] = {ROOK, CANNON, KNIGHT, ADVISOR, BISHOP, PAWN};
+        for (PieceType pt : flipOrder)
+            if (restPieces[make_piece(us, pt)])
+                ++flipTypes;
+        st->darkTypes *= std::max(flipTypes, 1);
+    }
 
     assert(pos_is_ok());
 

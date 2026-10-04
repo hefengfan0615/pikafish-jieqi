@@ -537,6 +537,11 @@ Value Search::Worker::search(
     // Dive into flip search when the last move is moving a dark pieces
     if ((ss - 1)->currentMove.is_ok() && pos.is_dark((ss - 1)->currentMove.to_sq()))
     {
+        // Hard cap on dark chains (jieqi_old logic): beyond MAXDARKDEPTH +
+        // QDARKDEPTH consecutive dark plies the flip tree would explode, so
+        // evaluate the position statically instead of iterating every flip.
+        if (pos.state()->darkDepth - MAXDARKDEPTH > QDARKDEPTH)
+            return evaluate(pos);
         constexpr auto nt = PvNode ? PV : NonPV;
         return flip_search<nt>(pos, ss, alpha, beta, false, depth, cutNode);
     }
@@ -1412,6 +1417,9 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     // Dive into flip search when the last move is moving a dark pieces
     if ((ss - 1)->currentMove.is_ok() && pos.is_dark((ss - 1)->currentMove.to_sq()))
     {
+        // Hard cap on dark chains (jieqi_old logic), same as in search().
+        if (pos.state()->darkDepth - MAXDARKDEPTH > QDARKDEPTH)
+            return evaluate(pos);
         constexpr auto nt = PvNode ? PV : NonPV;
         return flip_search<nt>(pos, ss, alpha, beta);
     }
@@ -1685,6 +1693,13 @@ Value Search::Worker::flip_search(
 
     assert(total != 0);
 
+    // Soft cap on dark chains (jieqi_old logic): once the cumulative dark
+    // budget is exhausted, search every remaining flip variant at depth 0
+    // (leaf) instead of full depth, so depth keeps rising even in positions
+    // with many hidden pieces.
+    const bool darkCapped = pos.state()->darkDepth > MAXDARKDEPTH
+                         || pos.state()->darkTypes > MAXDARKTYPES;
+
     DirtyPiece dp = accumulatorStack.latest_dirty_piece();
 
     // Collect per-flip results
@@ -1702,7 +1717,7 @@ Value Search::Worker::flip_search(
         if (isQsearch)
             value = qsearch<nodeType>(pos, ss, alpha, beta);
         else
-            value = search<nodeType>(pos, ss, alpha, beta, depth, cutNode);
+            value = search<nodeType>(pos, ss, alpha, beta, darkCapped ? 0 : depth, cutNode);
 
         pos.undo_flip((ss - 1)->currentMove.to_sq(), flipped_piece);
 
