@@ -31,5 +31,7 @@ jobs:
         working-directory: src
         run: |
           echo "===== Engine full output ====="
-          printf 'uci\nisready\nposition startpos\ngo movetime 5000\nquit\n' | ./pikafish
+          # Keep stdin open until the search finishes, otherwise the engine
+          # treats EOF as "quit" and terminates the search early.
+          { printf 'uci\nisready\nposition startpos\ngo movetime 5000\n'; sleep 8; printf 'quit\n'; } | ./pikafish
           echo "===== End of output ====="
