@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -37,9 +38,33 @@ std::vector<std::int32_t> decode_i32(ByteView view) {
     return out;
 }
 
+std::vector<std::int8_t> decode_i8(ByteView view) {
+    std::vector<std::int8_t> out(view.size);
+    if (!out.empty()) std::memcpy(out.data(), view.data, view.size);
+    return out;
+}
+
 std::int32_t trunc_div(std::int64_t numerator, std::int32_t denominator) {
     if (denominator == 0) throw std::logic_error("ABJNNUE probability divisor is zero");
     return static_cast<std::int32_t>(numerator / denominator);
+}
+
+std::array<std::uint8_t, RuntimeLayout::HeadInputWidth> make_head_input(
+  const Model& model, const std::uint8_t* transformed, const InventoryContext& context) {
+    std::array<std::uint8_t, RuntimeLayout::HeadInputWidth> input{};
+    std::copy_n(transformed, RuntimeLayout::AccumulatorWidth, input.begin());
+    const auto& biases = model.context_biases();
+    const auto& weights = model.context_weights();
+    for (std::size_t output = 0; output < RuntimeLayout::InventoryContextHidden; ++output)
+    {
+        std::int64_t sum = biases[output];
+        for (std::size_t feature = 0; feature < RuntimeLayout::InventoryContextInputs; ++feature)
+            sum += std::int32_t(context[feature])
+                 * std::int32_t(weights[output * RuntimeLayout::InventoryContextInputs + feature]);
+        input[RuntimeLayout::AccumulatorWidth + output] = static_cast<std::uint8_t>(
+          std::clamp<std::int64_t>(sum >> 7, 0, 127));
+    }
+    return input;
 }
 
 }  // namespace
@@ -57,20 +82,23 @@ std::shared_ptr<const Model> Model::load(const std::filesystem::path& path) {
 
     model->transformerBiases_ = decode_i16(layout.transformerBiases);
     model->featureWeights_ = decode_i16(layout.featureWeights);
-    model->psqtWeights_ = decode_i32(layout.psqtWeights);
+    model->contextBiases_ = decode_i32(layout.contextBiases);
+    model->contextWeights_ = decode_i8(layout.contextWeights);
     model->evalHeads_ = {layout.evalHeads.data, layout.evalHeads.data + layout.evalHeads.size};
     model->probabilityScoreToMass_ = decode_i32(layout.probabilityScoreToMass);
     model->probabilityMassToScore_ = decode_i32(layout.probabilityMassToScore);
 
     if (!model->inference_complete() || !model->probability_complete())
-        throw std::runtime_error("ABJCHESSV82 schema is incomplete");
+        throw std::runtime_error("ABJCHESSV11 schema is incomplete");
     return model;
 }
 
 bool Model::inference_complete() const noexcept {
     return transformerBiases_.size() == RuntimeLayout::AccumulatorWidth
         && featureWeights_.size() == RuntimeLayout::FeatureDimensions * RuntimeLayout::AccumulatorWidth
-        && psqtWeights_.size() == RuntimeLayout::FeatureDimensions * RuntimeLayout::PSQTBuckets
+        && contextBiases_.size() == RuntimeLayout::InventoryContextHidden
+        && contextWeights_.size() == RuntimeLayout::InventoryContextInputs
+                                      * RuntimeLayout::InventoryContextHidden
         && evalHeads_.size() == RuntimeLayout::EvalHeadsSize;
 }
 
@@ -79,29 +107,34 @@ bool Model::probability_complete() const noexcept {
         && probabilityMassToScore_.size() == RuntimeLayout::ProbabilityMassToScoreSize;
 }
 
-std::int32_t Model::propagate(std::uint32_t bucket, const std::uint8_t* transformed) const {
+std::int32_t Model::propagate(std::uint32_t bucket,
+                              const std::uint8_t* transformed,
+                              const InventoryContext& context) const {
     if (!inference_complete() || transformed == nullptr || bucket >= RuntimeLayout::LayerStacks)
-        throw std::logic_error("ABJCHESSV82 eval head is unavailable");
+        throw std::logic_error("ABJCHESSV11 eval head is unavailable");
 
     const auto* head = evalHeads_.data() + bucket * RuntimeLayout::EvalHeadBucketSize;
-    return Layers::propagate(head, transformed);
+    const auto input = make_head_input(*this, transformed, context);
+    return Layers::propagate(head, input.data());
 }
 
 std::int32_t Model::propagate_interpolated(std::uint32_t floor,
                                            std::uint8_t blendQ8,
-                                           const std::uint8_t* transformed) const {
+                                           const std::uint8_t* transformed,
+                                           const InventoryContext& context) const {
     if (!inference_complete() || transformed == nullptr || floor >= RuntimeLayout::LayerStacks)
-        throw std::logic_error("ABJCHESSV82 eval head is unavailable");
+        throw std::logic_error("ABJCHESSV11 eval head is unavailable");
     if (floor == RuntimeLayout::LayerStacks - 1 || blendQ8 == 0)
-        return propagate(floor, transformed);
+        return propagate(floor, transformed, context);
+    const auto input = make_head_input(*this, transformed, context);
     const auto* first = evalHeads_.data() + floor * RuntimeLayout::EvalHeadBucketSize;
     const auto* second = evalHeads_.data() + (floor + 1) * RuntimeLayout::EvalHeadBucketSize;
-    const auto a = static_cast<std::int64_t>(Layers::propagate(first, transformed));
-    const auto b = static_cast<std::int64_t>(Layers::propagate(second, transformed));
+    const auto a = static_cast<std::int64_t>(Layers::propagate(first, input.data()));
+    const auto b = static_cast<std::int64_t>(Layers::propagate(second, input.data()));
     const auto value = RuntimeLayout::interpolate_q8(a, b, blendQ8);
     if (value < std::numeric_limits<std::int32_t>::min()
         || value > std::numeric_limits<std::int32_t>::max())
-        throw std::overflow_error("ABJCHESSV82 interpolated head output overflow");
+        throw std::overflow_error("ABJCHESSV11 interpolated head output overflow");
     return static_cast<std::int32_t>(value);
 }
 
@@ -111,7 +144,7 @@ std::int32_t Model::aggregate_probability(const std::vector<std::pair<int, int>>
         throw std::invalid_argument(
           "ABJNNUE AggressiveLevel must be in the range 0..10");
     if (!probability_complete() || samples.empty())
-        throw std::logic_error("ABJCHESSV82 probability tables are unavailable");
+        throw std::logic_error("ABJCHESSV11 probability tables are unavailable");
     std::int32_t minimum = samples.front().first;
     std::int32_t maximum = minimum;
     std::int64_t total = 0;
@@ -183,7 +216,7 @@ std::string Model::summary() const {
     out << "ABJNNUE model loaded: " << pathText
         << " features=" << featureWeights_.size() / RuntimeLayout::AccumulatorWidth
         << " accumulator=" << transformerBiases_.size()
-        << " psqt_buckets=" << RuntimeLayout::PSQTBuckets
+        << " psqt_buckets=0"
         << " heads=" << evalHeads_.size() / RuntimeLayout::EvalHeadBucketSize
         << " head_backend=" << Layers::backend_name()
         << " inference_complete=" << (inference_complete() ? "true" : "false")

@@ -82,7 +82,7 @@ std::vector<std::filesystem::path> candidate_paths(const std::string& rootDirect
 
 void NetworkBig::load(const std::string& rootDirectory, const std::string& evalFile) {
     if (evalFile.empty())
-        throw std::invalid_argument("EvalFile must name a V8.2 .nnue package");
+        throw std::invalid_argument("EvalFile must name a V11 .nnue package");
 
     std::ostringstream missing;
     bool first = true;
@@ -110,13 +110,13 @@ void NetworkBig::load(const std::string& rootDirectory, const std::string& evalF
         return;
     }
 
-    throw std::runtime_error("ABJCHESSV82 file not found; tried: " + missing.str());
+    throw std::runtime_error("ABJCHESSV11 file not found; tried: " + missing.str());
 }
 
 void NetworkBig::verify(const std::string& requested,
                         const std::function<void(std::string_view)>& reporter) const {
     if (!model_ || currentFile_ != requested)
-        throw std::runtime_error("ABJCHESSV82 package was not loaded for EvalFile=" + requested);
+        throw std::runtime_error("ABJCHESSV11 package was not loaded for EvalFile=" + requested);
     if (reporter)
         reporter(model_->summary());
 }

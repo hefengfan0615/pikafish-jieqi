@@ -18,8 +18,9 @@ env:
   NDK_VERSION: r27c
   NDK_DIR: android-ndk-r27c
   NDK_BIN: /usr/local/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin
-  NNUE_URL: https://github.com/hefengfan0615/pikafish-jieqi/releases/download/v0.1/abjchess-20260911.nnue
-  NNUE_FILE: abjchess-20260911.nnue
+  NNUE_URL: https://github.com/lxsgx23/AB-JChess/releases/download/v0.2d/0.2d_bmi2.zip
+  NNUE_ZIP: 0.2d_bmi2.zip
+  NNUE_FILE: abjchess-20261010.nnue
   BUNDLED_ENGINE_DIR: jieqibox/src-tauri/engine-assets
   BUNDLED_ENGINE_NAME: pikafish
   RELEASE_TAG: v0.7.2-fengfan
@@ -37,11 +38,15 @@ jobs:
       - name: Download NNUE weights
         run: |
           set -e
-          curl -fL --retry 3 --retry-delay 5 -o "src/$NNUE_FILE" "$NNUE_URL"
+          # The v0.2d release ships the network inside a zip; extract the
+          # abjchess-20261010.nnue (AB-JChess V11 package) from it.
+          curl -fL --retry 3 --retry-delay 5 -o "$NNUE_ZIP" "$NNUE_URL"
+          unzip -p "$NNUE_ZIP" "*/$NNUE_FILE" > "src/$NNUE_FILE"
+          rm -f "$NNUE_ZIP"
           ls -la "src/$NNUE_FILE"
           magic="$(head -c 12 "src/$NNUE_FILE")"
           echo "NNUE magic: $magic"
-          [ "$magic" = "ABJCHESSV82" ] || { echo "Unexpected NNUE magic" >&2; exit 1; }
+          [ "$magic" = "ABJCHESSV11" ] || { echo "Unexpected NNUE magic" >&2; exit 1; }
 
       - name: Install Android NDK (${{ env.NDK_VERSION }})
         run: |
@@ -225,10 +230,10 @@ jobs:
           body: |
             ## 丰帆揭棋
 
-            内置揭棋引擎（pikafish-jieqi，AB-JChess V8.2 NNUE 评分）与权重，安装后无需额外加载引擎，直接对弈。
+            内置揭棋引擎（pikafish-jieqi，AB-JChess V11 NNUE 评分）与权重，安装后无需额外加载引擎，直接对弈。
 
-            - 引擎：pikafish-jieqi（arm64-v8a，AB-JChess V8.2 神经网络评分）
-            - 权重：abjchess-20260911.nnue
+            - 引擎：pikafish-jieqi（arm64-v8a，AB-JChess V11 神经网络评分）
+            - 权重：abjchess-20261010.nnue（来自 AB-JChess v0.2d）
             - 基于 JieqiBox 构建，去除 YOLO 图像识别模块
             - APK 已自动签名，可直接安装
           files: ${{ env.SIGNED_APK }}

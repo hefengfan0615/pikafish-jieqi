@@ -65,7 +65,7 @@ class MainActivity : TauriActivity() {
         copyBundledNnueAsset()
     }
 
-    // Copy assets/nnue/abjchess-20260911.nnue -> files/engines/bundled/.
+    // Copy assets/nnue/abjchess-20261010.nnue -> files/engines/bundled/.
     // The Rust extract_bundled_engine uses the same dir (config().identifier
     // equals this applicationId), so futures and engine stay colocated.
     private fun copyBundledNnueAsset() {
@@ -74,11 +74,11 @@ class MainActivity : TauriActivity() {
             if (!targetDir.exists()) {
                 targetDir.mkdirs()
             }
-            val target = File(targetDir, "abjchess-20260911.nnue")
+            val target = File(targetDir, "abjchess-20261010.nnue")
             if (target.exists() && target.length() > 0) {
                 return
             }
-            assets.open("nnue/abjchess-20260911.nnue").use { input ->
+            assets.open("nnue/abjchess-20261010.nnue").use { input ->
                 FileOutputStream(target).use { output ->
                     input.copyTo(output, bufferSize = 1 shl 16)
                     output.flush()

@@ -23,16 +23,17 @@ struct Chunk {
     std::string   sha256;
 };
 
-// V8.2 is deliberately a closed format.  The magic, version and schema string
-// are part of the weight contract; older package identities must never be
-// accepted here.
+// V11 is deliberately a closed format.  The magic, version and schema string
+// are part of the weight contract; packages with another identity are rejected.
 class Package {
    public:
-    static constexpr std::uint32_t Version = 82;
+    static constexpr std::uint32_t Version = 110;
+    static constexpr const char* ArchitectureHash = "04f4fe0b23c4e66187fa6d67a2d417174980f17a855abc19bbd4294c6431ca21";
+    static constexpr const char* FeatureHash = "ecdc69d39f113c79f75ce1932f176f38eba5f0f2f220bb89745709760f934cfa";
     static constexpr std::size_t HeaderSize = 24;
-    static constexpr const char* Schema = "abjchess-v8.2-full4way-noaux-v1";
+    static constexpr const char* Schema = "abjchess-v11-sfnn-inventory-context-v1";
     static constexpr const char* FeatureIdentity =
-      "HalfKAv2_hm_jieqi_v8.1_full4way_meta_midmirror_threat_interp";
+      "HalfKAv2_hm_jieqi_v11_sfnn_pool_owner_exact_loss_visible_threat_summary_no_relation_threat_input";
 
     static Package load(const std::filesystem::path& path);
 

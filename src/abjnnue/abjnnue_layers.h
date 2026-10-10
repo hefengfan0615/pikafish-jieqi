@@ -5,7 +5,7 @@
 
 namespace ABJNNUE::Layers {
 
-// Evaluates one V8 2048 -> pairwise 1024 -> 15 -> 32 -> 1 runtime head.
+// Evaluates one V11 SFNN head: 2064->32, pair->64->32, concat->128->1 plus skip.
 std::int32_t propagate(const std::uint8_t* head, const std::uint8_t* input);
 
 // Bit-exact reference used to validate every architecture-specific path.

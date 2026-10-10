@@ -35,7 +35,7 @@ type EngineProcess = Arc<Mutex<Option<CommandChild>>>;
 // variants of the Rust JNI lib; embedding the ~130MB network via
 // include_bytes! would stamp a full copy into each variant (~520MB total).
 // Instead the NNUE is packaged ONCE as an Android raw asset
-// (assets/nnue/abjchess-20260911.nnue) and copied into the bundled engine
+// (assets/nnue/abjchess-20261010.nnue) and copied into the bundled engine
 // dir by MainActivity at launch; extract_bundled_engine just waits for it.
 //
 // These are gated behind target_os = "android" so desktop builds (which do
@@ -46,7 +46,7 @@ const BUNDLED_ENGINE_NAME: &str = "pikafish";
 #[cfg(target_os = "android")]
 const BUNDLED_ENGINE_BYTES: &[u8] = include_bytes!("../engine-assets/pikafish");
 #[cfg(target_os = "android")]
-const BUNDLED_NNUE_NAME: &str = "abjchess-20260911.nnue";
+const BUNDLED_NNUE_NAME: &str = "abjchess-20261010.nnue";
 #[cfg(target_os = "android")]
 const BUNDLED_ENGINE_ID: &str = "engine_bundled";
 

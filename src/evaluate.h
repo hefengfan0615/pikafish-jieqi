@@ -31,8 +31,8 @@ class Position;
 namespace Eval {
 
 namespace NNUE {
-// Default V8.2 network shipped with the release package.
-constexpr const char* EvalFileDefaultNameBig = "abjchess-20260911.nnue";
+// Default V11 network shipped with the release package.
+constexpr const char* EvalFileDefaultNameBig = "abjchess-20261010.nnue";
 struct Networks;
 struct AccumulatorCaches;
 using AccumulatorStack = ::ABJNNUE::AccumulatorStack;

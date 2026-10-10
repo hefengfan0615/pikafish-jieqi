@@ -15,11 +15,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download NNUE from release
+      - name: Download NNUE from AB-JChess v0.2d release
         run: |
-          curl -L -o src/abjchess-20260911.nnue \
-            https://github.com/hefengfan0615/pikafish-jieqi/releases/download/v0.1/abjchess-20260911.nnue
-          ls -la src/abjchess-20260911.nnue
+          curl -fL --retry 3 -o nnue.zip \
+            https://github.com/lxsgx23/AB-JChess/releases/download/v0.2d/0.2d_bmi2.zip
+          unzip -p nnue.zip '*/abjchess-20261010.nnue' > src/abjchess-20261010.nnue
+          rm -f nnue.zip
+          ls -la src/abjchess-20261010.nnue
+          [ "$(head -c 12 src/abjchess-20261010.nnue)" = "ABJCHESSV11" ]
 
       - name: Build engine
         working-directory: src

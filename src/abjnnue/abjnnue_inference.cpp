@@ -100,6 +100,18 @@ RawEvaluation Inference::evaluate_accumulated(const Model& model,
                                               const AccumulatedPosition& accumulated,
                                               LayerStackSelection selection,
                                               TransformedFeatures* transformedOutput) {
+    return evaluate_accumulated(model, position, accumulated, selection,
+                                FeatureEncoder::inventory_context(position,
+                                                                   position.side_to_move()),
+                                transformedOutput);
+}
+
+RawEvaluation Inference::evaluate_accumulated(const Model& model,
+                                              const Stockfish::Position& position,
+                                              const AccumulatedPosition& accumulated,
+                                              LayerStackSelection selection,
+                                              const InventoryContext& inventoryContext,
+                                              TransformedFeatures* transformedOutput) {
     if (selection.floor >= RuntimeLayout::LayerStacks)
         throw std::logic_error("ABJNNUE layer-stack bucket is out of range");
     if (selection.floor == RuntimeLayout::LayerStacks - 1) selection.blendQ8 = 0;
@@ -112,21 +124,11 @@ RawEvaluation Inference::evaluate_accumulated(const Model& model,
                               transformed.data()
                                 + perspectiveIndex * RuntimeLayout::PerspectiveOutputWidth);
     }
-    const auto& usPsqt = accumulated.perspectives[order[0]].psqt;
-    const auto& themPsqt = accumulated.perspectives[order[1]].psqt;
     RawEvaluation raw;
-    const auto floor = selection.floor;
-    const auto next = std::min<std::uint32_t>(floor + 1, RuntimeLayout::PSQTBuckets - 1);
-    const auto psqt0 = static_cast<std::int64_t>(usPsqt[floor]) - themPsqt[floor];
-    const auto psqt1 = static_cast<std::int64_t>(usPsqt[next]) - themPsqt[next];
-    const auto psqt = RuntimeLayout::interpolate_q8(psqt0, psqt1, selection.blendQ8);
-    if (psqt < std::numeric_limits<std::int32_t>::min()
-        || psqt > std::numeric_limits<std::int32_t>::max())
-        throw std::overflow_error("ABJCHESSV82 interpolated PSQT output overflow");
-    raw.psqtRaw = static_cast<std::int32_t>(psqt / 2);
     raw.positionalRaw = model.propagate_interpolated(selection.floor,
                                                        selection.blendQ8,
-                                                       transformed.data());
+                                                       transformed.data(),
+                                                       inventoryContext);
     if (transformedOutput) *transformedOutput = transformed;
     return raw;
 }
@@ -139,7 +141,6 @@ InferenceResult Inference::evaluate(const Model& model, const Stockfish::Positio
     const auto raw = evaluate_accumulated(model, position, result.accumulated,
                                           result.encoded.layerStackSelection,
                                           &result.transformed);
-    result.psqtRaw = raw.psqtRaw;
     result.positionalRaw = raw.positionalRaw;
     return result;
 }

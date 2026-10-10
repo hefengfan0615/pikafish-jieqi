@@ -19,12 +19,10 @@ struct InferenceResult {
     EncodedPosition     encoded;
     AccumulatedPosition accumulated;
     TransformedFeatures transformed{};
-    std::int32_t        psqtRaw = 0;
     std::int32_t        positionalRaw = 0;
 };
 
 struct RawEvaluation {
-    std::int32_t psqtRaw = 0;
     std::int32_t positionalRaw = 0;
 };
 
@@ -45,6 +43,12 @@ class Inference {
                                               const Stockfish::Position& position,
                                               const AccumulatedPosition& accumulated,
                                               LayerStackSelection selection,
+                                              TransformedFeatures* transformed = nullptr);
+    static RawEvaluation evaluate_accumulated(const Model& model,
+                                              const Stockfish::Position& position,
+                                              const AccumulatedPosition& accumulated,
+                                              LayerStackSelection selection,
+                                              const InventoryContext& inventoryContext,
                                               TransformedFeatures* transformed = nullptr);
 
     static const InferenceStats& stats() noexcept;

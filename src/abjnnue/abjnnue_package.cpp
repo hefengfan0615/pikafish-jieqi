@@ -15,7 +15,7 @@ namespace ABJNNUE {
 namespace {
 
 constexpr std::array<std::uint8_t, 16> Magic = {
-  'A', 'B', 'J', 'C', 'H', 'E', 'S', 'S', 'V', '8', '2', 0, 0, 0, 0, 0};
+  'A', 'B', 'J', 'C', 'H', 'E', 'S', 'S', 'V', '1', '1', 0, 0, 0, 0, 0};
 
 struct RequiredChunk {
     const char*   name;
@@ -23,17 +23,16 @@ struct RequiredChunk {
 };
 
 constexpr std::uint64_t AccumulatorWidth = 2048;
-constexpr std::uint64_t FeatureDimensions = 31776;
-constexpr std::uint64_t PSQTBuckets = 16;
+constexpr std::uint64_t FeatureDimensions = 34800;
 constexpr std::uint64_t LayerStacks = 16;
 constexpr std::uint64_t TransformerBiasesSize = AccumulatorWidth * sizeof(std::int16_t);
 constexpr std::uint64_t FeatureWeightsSize =
   FeatureDimensions * AccumulatorWidth * sizeof(std::int16_t);
-constexpr std::uint64_t PSQTWeightsSize =
-  FeatureDimensions * PSQTBuckets * sizeof(std::int32_t);
+constexpr std::uint64_t ContextBiasesSize = 16 * sizeof(std::int32_t);
+constexpr std::uint64_t ContextWeightsSize = 16 * 16 * sizeof(std::int8_t);
 constexpr std::uint64_t PrimarySize =
-  TransformerBiasesSize + FeatureWeightsSize + PSQTWeightsSize;
-constexpr std::uint64_t EvalHeadBucketSize = 34208;
+  TransformerBiasesSize + FeatureWeightsSize + ContextBiasesSize + ContextWeightsSize;
+constexpr std::uint64_t EvalHeadBucketSize = 68544;
 constexpr std::uint64_t EvalHeadsSize = LayerStacks * EvalHeadBucketSize;
 constexpr std::uint64_t ProbabilityScoreToMassSize = 4001 * sizeof(std::int32_t);
 constexpr std::uint64_t ProbabilityMassToScoreSize = 1901 * sizeof(std::int32_t);
@@ -48,9 +47,9 @@ constexpr std::array<RequiredChunk, 4> RequiredChunks = {{
 constexpr std::uint64_t RequiredPayloadSize =
   PrimarySize + EvalHeadsSize + ProbabilityScoreToMassSize + ProbabilityMassToScoreSize;
 
-static_assert(PrimarySize == 132192256);
-static_assert(EvalHeadsSize == 547328);
-static_assert(RequiredPayloadSize == 132763192);
+static_assert(PrimarySize == 142545216);
+static_assert(EvalHeadsSize == 1096704);
+static_assert(RequiredPayloadSize == 143665528);
 
 constexpr std::array<std::uint32_t, 64> K = {
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
@@ -286,19 +285,19 @@ Package Package::load(const std::filesystem::path& path) {
         throw std::runtime_error("package length query failed");
     const auto fileSize = static_cast<std::size_t>(length);
     if (fileSize < HeaderSize)
-        throw std::runtime_error("ABJCHESSV82 package is shorter than its header");
+        throw std::runtime_error("ABJCHESSV11 package is shorter than its header");
     package.bytes_.resize(fileSize);
     stream.seekg(0);
     stream.read(reinterpret_cast<char*>(package.bytes_.data()), package.bytes_.size());
     if (!stream) throw std::runtime_error("short package read");
 
     if (!std::equal(Magic.begin(), Magic.end(), package.bytes_.begin()))
-        throw std::runtime_error("bad ABJCHESSV82 magic");
+        throw std::runtime_error("bad ABJCHESSV11 magic");
     package.version_ = read_u32_le(package.bytes_.data() + 16);
-    if (package.version_ != Version) throw std::runtime_error("unsupported ABJCHESSV82 package version");
+    if (package.version_ != Version) throw std::runtime_error("unsupported ABJCHESSV11 package version");
     const std::uint32_t metadataLength = read_u32_le(package.bytes_.data() + 20);
     if (metadataLength == 0 || metadataLength > fileSize - HeaderSize)
-        throw std::runtime_error("ABJCHESSV82 metadata length is invalid");
+        throw std::runtime_error("ABJCHESSV11 metadata length is invalid");
     package.payloadOffset_ = HeaderSize + metadataLength;
     package.payloadSize_ = package.bytes_.size() - package.payloadOffset_;
     package.metadataJson_.assign(reinterpret_cast<const char*>(package.bytes_.data() + HeaderSize),
@@ -306,17 +305,23 @@ Package Package::load(const std::filesystem::path& path) {
     if (json_top_u64(package.metadataJson_, "format_version") != Version)
         throw std::runtime_error("metadata format_version mismatch");
     if (json_top_string(package.metadataJson_, "schema") != Schema)
-        throw std::runtime_error("ABJCHESSV82 schema identity mismatch");
+        throw std::runtime_error("ABJCHESSV11 schema identity mismatch");
     if (json_top_string(package.metadataJson_, "feature_identity") != FeatureIdentity)
-        throw std::runtime_error("ABJCHESSV82 feature identity mismatch");
+        throw std::runtime_error("ABJCHESSV11 feature identity mismatch");
+    if (json_top_string(package.metadataJson_, "feature_identity_sha256") != FeatureHash)
+        throw std::runtime_error("ABJCHESSV11 feature hash mismatch");
+    if (json_top_string(package.metadataJson_, "architecture_sha256") != ArchitectureHash)
+        throw std::runtime_error("ABJCHESSV11 architecture hash mismatch");
     if (json_top_string(package.metadataJson_, "interpolation_format") != "Q0.8"
         || json_top_string(package.metadataJson_, "interpolation_formula") != "continuous-q0.8-v1")
-        throw std::runtime_error("ABJCHESSV82 interpolation marker mismatch");
-    if (json_top_u64(package.metadataJson_, "feature_dimensions") != 31776
+        throw std::runtime_error("ABJCHESSV11 interpolation marker mismatch");
+    if (json_top_u64(package.metadataJson_, "feature_dimensions") != 34800
         || json_top_u64(package.metadataJson_, "accumulator_width") != 2048
-        || json_top_u64(package.metadataJson_, "psqt_buckets") != 16
-        || json_top_u64(package.metadataJson_, "layer_stacks") != 16)
-        throw std::runtime_error("ABJCHESSV82 tensor dimensions mismatch");
+        || json_top_u64(package.metadataJson_, "inventory_context_inputs") != 16
+        || json_top_u64(package.metadataJson_, "inventory_context_hidden") != 16
+        || json_top_u64(package.metadataJson_, "layer_stacks") != 16
+        || json_top_u64(package.metadataJson_, "psqt_buckets") != 0)
+        throw std::runtime_error("ABJCHESSV11 tensor dimensions mismatch");
 
     for (const auto object : chunk_objects(package.metadataJson_))
     {
@@ -336,7 +341,7 @@ Package Package::load(const std::filesystem::path& path) {
         package.chunks_.push_back(std::move(chunk));
     }
     if (package.chunks_.size() != RequiredChunks.size())
-        throw std::runtime_error("ABJCHESSV82 package must contain exactly four chunks");
+        throw std::runtime_error("ABJCHESSV11 package must contain exactly four chunks");
     std::uint64_t expectedOffset = 0;
     for (const auto& required : RequiredChunks)
     {
@@ -344,13 +349,13 @@ Package Package::load(const std::filesystem::path& path) {
             throw std::runtime_error("missing required chunk: " + std::string(required.name));
         const auto& chunk = package.chunk(required.name);
         if (chunk.size != required.size)
-            throw std::runtime_error("ABJCHESSV82 chunk size mismatch: " + chunk.name);
+            throw std::runtime_error("ABJCHESSV11 chunk size mismatch: " + chunk.name);
         if (chunk.dataOffset != expectedOffset)
-            throw std::runtime_error("ABJCHESSV82 chunk layout mismatch: " + chunk.name);
+            throw std::runtime_error("ABJCHESSV11 chunk layout mismatch: " + chunk.name);
         expectedOffset += required.size;
     }
     if (expectedOffset != RequiredPayloadSize || package.payloadSize_ != RequiredPayloadSize)
-        throw std::runtime_error("ABJCHESSV82 payload size mismatch");
+        throw std::runtime_error("ABJCHESSV11 payload size mismatch");
 
     for (std::size_t i = 0; i < package.chunks_.size(); ++i)
         for (std::size_t j = i + 1; j < package.chunks_.size(); ++j)
@@ -358,7 +363,7 @@ Package Package::load(const std::filesystem::path& path) {
             const auto& a = package.chunks_[i];
             const auto& b = package.chunks_[j];
             if (a.dataOffset < b.dataOffset + b.size && b.dataOffset < a.dataOffset + a.size)
-                throw std::runtime_error("overlapping ABJCHESSV82 chunks");
+                throw std::runtime_error("overlapping ABJCHESSV11 chunks");
         }
     for (const auto& chunk : package.chunks_)
     {
@@ -368,7 +373,7 @@ Package Package::load(const std::filesystem::path& path) {
         auto expectedHash = chunk.sha256;
         std::transform(expectedHash.begin(), expectedHash.end(), expectedHash.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (digest != expectedHash) throw std::runtime_error("ABJCHESSV82 chunk SHA-256 mismatch: " + chunk.name);
+        if (digest != expectedHash) throw std::runtime_error("ABJCHESSV11 chunk SHA-256 mismatch: " + chunk.name);
     }
     return package;
 }

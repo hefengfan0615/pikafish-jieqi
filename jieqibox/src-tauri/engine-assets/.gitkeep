@@ -2,7 +2,7 @@
 #
 # The GitHub Actions workflow:
 #   1. compiles  ../src/AB-JChess  (arm64) into  ./AB-JChess
-#   2. downloads abjchess-20260911.nnue and copies it here as  ./abjchess-20260911.nnue
+#   2. downloads abjchess-20261010.nnue and copies it here as  ./abjchess-20261010.nnue
 #
 # These two files are embedded into the Rust lib via include_bytes! (Android
 # only, see src-tauri/src/lib.rs) and shipped inside the final APK, so end

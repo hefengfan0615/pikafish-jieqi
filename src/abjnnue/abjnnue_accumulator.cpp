@@ -92,124 +92,11 @@ void validate_indices(const FeatureIndices& added, std::size_t addedCount,
             throw std::logic_error("ABJNNUE incremental feature index is out of range");
 }
 
-#if !defined(ABJNNUE_RUNTIME_FUSED_UPDATE)
-void apply_features_legacy(const Model& model,
-                           PerspectiveAccumulation& destination,
-                           const FeatureIndices& added, std::size_t addedCount,
-                           const FeatureIndices& removed, std::size_t removedCount) {
-    for (std::size_t i = 0; i < addedCount; ++i)
-    {
-        const auto* weights = model.feature_weights().data()
-                            + std::size_t(added[i]) * RuntimeLayout::AccumulatorWidth;
-        const auto* psqt = model.psqt_weights().data()
-                         + std::size_t(added[i]) * RuntimeLayout::PSQTBuckets;
-#if defined(USE_AVX2)
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 16)
-        {
-            auto value = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(destination.values.data() + column));
-            value = _mm256_add_epi16(
-              value, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + column)));
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination.values.data() + column),
-                                value);
-        }
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 8)
-        {
-            auto psqtValue = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(destination.psqt.data() + bucket));
-            psqtValue = _mm256_add_epi32(
-              psqtValue,
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(psqt + bucket)));
-            _mm256_storeu_si256(
-              reinterpret_cast<__m256i*>(destination.psqt.data() + bucket), psqtValue);
-        }
-#elif defined(USE_SSE2)
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 8)
-        {
-            auto value = _mm_loadu_si128(
-              reinterpret_cast<const __m128i*>(destination.values.data() + column));
-            value = _mm_add_epi16(
-              value, _mm_loadu_si128(reinterpret_cast<const __m128i*>(weights + column)));
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.values.data() + column),
-                             value);
-        }
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 4)
-        {
-            auto psqtValue = _mm_loadu_si128(
-              reinterpret_cast<const __m128i*>(destination.psqt.data() + bucket));
-            psqtValue = _mm_add_epi32(
-              psqtValue, _mm_loadu_si128(reinterpret_cast<const __m128i*>(psqt + bucket)));
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.psqt.data() + bucket),
-                             psqtValue);
-        }
-#else
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; ++column)
-            destination.values[column] = add_wrapped(destination.values[column], weights[column]);
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; ++bucket)
-            destination.psqt[bucket] = add_wrapped(destination.psqt[bucket], psqt[bucket]);
-#endif
-    }
-    for (std::size_t i = 0; i < removedCount; ++i)
-    {
-        const auto* weights = model.feature_weights().data()
-                            + std::size_t(removed[i]) * RuntimeLayout::AccumulatorWidth;
-        const auto* psqt = model.psqt_weights().data()
-                         + std::size_t(removed[i]) * RuntimeLayout::PSQTBuckets;
-#if defined(USE_AVX2)
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 16)
-        {
-            auto value = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(destination.values.data() + column));
-            value = _mm256_sub_epi16(
-              value, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + column)));
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination.values.data() + column),
-                                value);
-        }
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 8)
-        {
-            auto psqtValue = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(destination.psqt.data() + bucket));
-            psqtValue = _mm256_sub_epi32(
-              psqtValue,
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(psqt + bucket)));
-            _mm256_storeu_si256(
-              reinterpret_cast<__m256i*>(destination.psqt.data() + bucket), psqtValue);
-        }
-#elif defined(USE_SSE2)
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 8)
-        {
-            auto value = _mm_loadu_si128(
-              reinterpret_cast<const __m128i*>(destination.values.data() + column));
-            value = _mm_sub_epi16(
-              value, _mm_loadu_si128(reinterpret_cast<const __m128i*>(weights + column)));
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.values.data() + column),
-                             value);
-        }
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 4)
-        {
-            auto psqtValue = _mm_loadu_si128(
-              reinterpret_cast<const __m128i*>(destination.psqt.data() + bucket));
-            psqtValue = _mm_sub_epi32(
-              psqtValue, _mm_loadu_si128(reinterpret_cast<const __m128i*>(psqt + bucket)));
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.psqt.data() + bucket),
-                             psqtValue);
-        }
-#else
-        for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; ++column)
-            destination.values[column] = sub_wrapped(destination.values[column], weights[column]);
-        for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; ++bucket)
-            destination.psqt[bucket] = sub_wrapped(destination.psqt[bucket], psqt[bucket]);
-#endif
-    }
-}
-#endif
-
 void apply_features(const Model& model,
                     PerspectiveAccumulation& destination,
                     const FeatureIndices& added, std::size_t addedCount,
                     const FeatureIndices& removed, std::size_t removedCount) {
     validate_indices(added, addedCount, removed, removedCount);
-#if defined(ABJNNUE_RUNTIME_FUSED_UPDATE)
 #if defined(USE_AVX2)
     for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 16)
     {
@@ -230,26 +117,6 @@ void apply_features(const Model& model,
               value, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + column)));
         }
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination.values.data() + column), value);
-    }
-    for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 8)
-    {
-        auto value = _mm256_loadu_si256(
-          reinterpret_cast<const __m256i*>(destination.psqt.data() + bucket));
-        for (std::size_t i = 0; i < addedCount; ++i)
-        {
-            const auto* psqt = model.psqt_weights().data()
-                             + std::size_t(added[i]) * RuntimeLayout::PSQTBuckets;
-            value = _mm256_add_epi32(
-              value, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(psqt + bucket)));
-        }
-        for (std::size_t i = 0; i < removedCount; ++i)
-        {
-            const auto* psqt = model.psqt_weights().data()
-                             + std::size_t(removed[i]) * RuntimeLayout::PSQTBuckets;
-            value = _mm256_sub_epi32(
-              value, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(psqt + bucket)));
-        }
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(destination.psqt.data() + bucket), value);
     }
 #elif defined(USE_SSE2)
     for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; column += 8)
@@ -272,26 +139,6 @@ void apply_features(const Model& model,
         }
         _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.values.data() + column), value);
     }
-    for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; bucket += 4)
-    {
-        auto value = _mm_loadu_si128(
-          reinterpret_cast<const __m128i*>(destination.psqt.data() + bucket));
-        for (std::size_t i = 0; i < addedCount; ++i)
-        {
-            const auto* psqt = model.psqt_weights().data()
-                             + std::size_t(added[i]) * RuntimeLayout::PSQTBuckets;
-            value = _mm_add_epi32(
-              value, _mm_loadu_si128(reinterpret_cast<const __m128i*>(psqt + bucket)));
-        }
-        for (std::size_t i = 0; i < removedCount; ++i)
-        {
-            const auto* psqt = model.psqt_weights().data()
-                             + std::size_t(removed[i]) * RuntimeLayout::PSQTBuckets;
-            value = _mm_sub_epi32(
-              value, _mm_loadu_si128(reinterpret_cast<const __m128i*>(psqt + bucket)));
-        }
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(destination.psqt.data() + bucket), value);
-    }
 #else
     for (std::size_t column = 0; column < RuntimeLayout::AccumulatorWidth; ++column)
     {
@@ -306,20 +153,6 @@ void apply_features(const Model& model,
               model.feature_weights()[std::size_t(removed[i]) * RuntimeLayout::AccumulatorWidth
                                       + column]);
     }
-    for (std::size_t bucket = 0; bucket < RuntimeLayout::PSQTBuckets; ++bucket)
-    {
-        for (std::size_t i = 0; i < addedCount; ++i)
-            destination.psqt[bucket] = add_wrapped(
-              destination.psqt[bucket],
-              model.psqt_weights()[std::size_t(added[i]) * RuntimeLayout::PSQTBuckets + bucket]);
-        for (std::size_t i = 0; i < removedCount; ++i)
-            destination.psqt[bucket] = sub_wrapped(
-              destination.psqt[bucket],
-              model.psqt_weights()[std::size_t(removed[i]) * RuntimeLayout::PSQTBuckets + bucket]);
-    }
-#endif
-#else
-    apply_features_legacy(model, destination, added, addedCount, removed, removedCount);
 #endif
 }
 
@@ -496,6 +329,8 @@ void AccumulatorStack::push(const DirtyPiece& dirtyPiece, const Position& positi
     validate_dirty_piece(dirtyPiece, size_);
     Entry& entry = entries_[size_++];
     entry.dirtyPiece = dirtyPiece;
+    entry.removedDarkOwner = dirtyPiece.remove_pc == DARK_PIECE
+                               ? position.side_to_move() : WHITE;
     entry.metadata = capture_metadata(position);
     entry.computed = false;
 }
@@ -512,20 +347,10 @@ void AccumulatorStack::pop() {
 
 AccumulatorStack::Metadata AccumulatorStack::capture_metadata(const Position& position) {
     Metadata metadata;
-    metadata.layerStackBucket = FeatureEncoder::layer_stack_bucket(position);
-    metadata.blendQ8 = FeatureEncoder::layer_stack_selection(position).blendQ8;
+    const auto selection = FeatureEncoder::layer_stack_selection(position);
+    metadata.layerStackBucket = selection.floor;
+    metadata.blendQ8 = selection.blendQ8;
     metadata.darkSquares = FeatureEncoder::dark_square_count(position);
-    const auto restCount = [&](Color color) {
-        int total = 0;
-        for (PieceType type : RestOrder)
-            total += position.rest_piece(make_piece(color, type));
-        return total;
-    };
-    const auto strongCount = [&](Color color) {
-        return position.rest_piece(make_piece(color, ROOK))
-             + position.rest_piece(make_piece(color, CANNON))
-             + position.rest_piece(make_piece(color, KNIGHT));
-    };
     const auto density = [](std::size_t count) {
         if (count == 0) return 0;
         if (count <= 2) return 1;
@@ -536,63 +361,90 @@ AccumulatorStack::Metadata AccumulatorStack::capture_metadata(const Position& po
         if (count <= 24) return 6;
         return 7;
     };
-    const auto darkByColor = [&](Color color) {
-        int count = 0;
-        for (Square square = SQ_A0; square <= SQ_I9; ++square)
-            if (position.is_dark(square) && color_of(position.piece_on(square)) == color)
-                ++count;
-        return count;
-    };
-    const auto threatSummary = [&](Color color) {
-        std::array<int, 2> result{};
-        const Color enemy = ~color;
-        for (Square square = SQ_A0; square <= SQ_I9; ++square)
-        {
-            const Piece target = position.piece_on(square);
-            if (target == NO_PIECE || position.is_dark(square)) continue;
-            const auto attackers = position.attackers_to(square)
-                                 & position.pieces(color) & ~position.pieces(DARK);
-            const auto enemyAttackers = position.attackers_to(square)
-                                      & position.pieces(enemy) & ~position.pieces(DARK);
-            if (color_of(target) == enemy && attackers) ++result[0];
-            if (color_of(target) == color && enemyAttackers) ++result[1];
-        }
-        result[0] = std::clamp(result[0], 0, 7);
-        result[1] = std::clamp(result[1], 0, 7);
-        return result;
-    };
-    for (Color perspective : {WHITE, BLACK})
+    std::array<int, COLOR_NB> darkByColor{};
+    std::array<std::array<int, 2>, COLOR_NB> threats{};
+    std::array<bool, COLOR_NB> hasRook{};
+    std::array<bool, COLOR_NB> hasKnightOrCannon{};
+    std::array<int, COLOR_NB> restTotals{};
+    std::array<int, COLOR_NB> strongTotals{};
+    const auto dark = position.pieces(DARK);
+    for (Square square = SQ_A0; square <= SQ_I9; ++square)
     {
-        metadata.kingTransforms[perspective] = FeatureEncoder::king_transform(position, perspective);
-        metadata.attackBuckets[perspective] = static_cast<std::uint8_t>(
-          FeatureEncoder::attack_bucket(position, perspective));
-        metadata.midMirrors[perspective] = FeatureEncoder::requires_mid_mirror(position, perspective);
+        const Piece target = position.piece_on(square);
+        if (target == NO_PIECE) continue;
+        const Color owner = color_of(target);
+        if (position.is_dark(square))
+        {
+            ++darkByColor[owner];
+            continue;
+        }
+        switch (type_of(target))
+        {
+        case ROOK: hasRook[owner] = true; break;
+        case KNIGHT:
+        case CANNON: hasKnightOrCannon[owner] = true; break;
+        default: break;
+        }
+        const auto attackers = position.attackers_to(square);
+        const auto whiteAttackers = attackers & position.pieces(WHITE) & ~dark;
+        const auto blackAttackers = attackers & position.pieces(BLACK) & ~dark;
+        if (owner == WHITE)
+        {
+            if (blackAttackers)
+            {
+                ++threats[WHITE][1];
+                ++threats[BLACK][0];
+            }
+        }
+        else
+        {
+            if (whiteAttackers)
+            {
+                ++threats[BLACK][1];
+                ++threats[WHITE][0];
+            }
+        }
+    }
+    const auto midMirrors = FeatureEncoder::requires_mid_mirrors(position);
+    for (Color color : {WHITE, BLACK})
         for (std::size_t typeIndex = 0; typeIndex < std::size(RestOrder); ++typeIndex)
         {
-            const int count = position.rest_piece(make_piece(perspective, RestOrder[typeIndex]));
+            const int count = position.rest_piece(make_piece(color, RestOrder[typeIndex]));
             if (count < 0 || count > 16)
-                throw std::runtime_error("ABJNNUE V8 rest-piece count is outside its domain");
-            metadata.restCounts[perspective][typeIndex] = static_cast<std::uint8_t>(count);
+                throw std::runtime_error("ABJNNUE V11 rest-piece count is outside its domain");
+            metadata.restCounts[color][typeIndex] = static_cast<std::uint8_t>(count);
+            restTotals[color] += count;
+            if (typeIndex < 3) strongTotals[color] += count;
         }
+    for (Color perspective : {WHITE, BLACK})
+    {
+        metadata.midMirrors[perspective] = midMirrors[perspective];
+        metadata.kingTransforms[perspective] =
+          FeatureEncoder::king_transform(position, perspective, midMirrors[perspective]);
+        metadata.attackBuckets[perspective] = static_cast<std::uint8_t>(
+          (hasRook[perspective] ? 2 : 0) + (hasKnightOrCannon[perspective] ? 1 : 0));
         const Color enemy = ~perspective;
-        const auto threats = threatSummary(perspective);
-        const int unknownLoss = restCount(perspective) - darkByColor(perspective);
-        const int enemyUnknownLoss = restCount(enemy) - darkByColor(enemy);
+        threats[perspective][0] = std::clamp(threats[perspective][0], 0, 7);
+        threats[perspective][1] = std::clamp(threats[perspective][1], 0, 7);
+        const int unknownLoss = restTotals[perspective] - darkByColor[perspective];
+        const int enemyUnknownLoss = restTotals[enemy] - darkByColor[enemy];
         if (unknownLoss < 0 || unknownLoss > 15
             || enemyUnknownLoss < 0 || enemyUnknownLoss > 15)
             throw std::runtime_error(
-              "ABJNNUE V8.1 unknown_loss is outside the observation domain");
+              "ABJNNUE V11 unknown_loss is outside the observation domain");
         metadata.metaOffsets[perspective] = {
-          static_cast<std::uint8_t>(std::clamp(strongCount(perspective), 0, 7)),
-          static_cast<std::uint8_t>(8 + std::clamp(strongCount(enemy), 0, 7)),
-          static_cast<std::uint8_t>(16 + std::clamp(restCount(perspective), 0, 7)),
-          static_cast<std::uint8_t>(24 + std::clamp(restCount(enemy), 0, 7)),
+          static_cast<std::uint8_t>(std::clamp(strongTotals[perspective], 0, 7)),
+          static_cast<std::uint8_t>(8 + std::clamp(strongTotals[enemy], 0, 7)),
+          static_cast<std::uint8_t>(16 + std::clamp(restTotals[perspective], 0, 7)),
+          static_cast<std::uint8_t>(24 + std::clamp(restTotals[enemy], 0, 7)),
           static_cast<std::uint8_t>(32 + density(metadata.darkSquares)),
-          static_cast<std::uint8_t>(40 + std::min(3, unknownLoss)),
-          static_cast<std::uint8_t>(44 + std::min(3, enemyUnknownLoss)),
-          static_cast<std::uint8_t>(48 + threats[0]),
-          static_cast<std::uint8_t>(56 + threats[1])};
+          static_cast<std::uint8_t>(40 + unknownLoss),
+          static_cast<std::uint8_t>(56 + enemyUnknownLoss),
+          static_cast<std::uint8_t>(72 + threats[perspective][0]),
+          static_cast<std::uint8_t>(80 + threats[perspective][1])};
     }
+    for (Color color : {WHITE, BLACK})
+        metadata.darkCounts[color] = static_cast<std::uint8_t>(darkByColor[color]);
     metadata.valid = true;
     return metadata;
 }
@@ -612,6 +464,7 @@ AccumulatorStack::metadata_from_encoded(const EncodedPosition& encoded) {
         metadata.restCounts[perspective] = side.restCounts;
         metadata.metaOffsets[perspective] = side.metaOffsets;
     }
+    metadata.darkCounts = encoded.darkCounts;
     metadata.valid = true;
     return metadata;
 }
@@ -644,26 +497,46 @@ void AccumulatorStack::apply_transition(const Model& model,
             return FeatureEncoder::board_index(perspective, square, piece, bucket,
                                                transform.mirror);
         };
+        const auto darkBoardIndex = [&](Square square, Color owner) {
+            return FeatureEncoder::dark_board_index(perspective, owner, square, bucket,
+                                                    transform.mirror);
+        };
         FeatureIndices added{}, removed{};
         std::size_t addedCount = 0, removedCount = 0;
         const auto append = [&](std::uint32_t index, bool add) {
             if (add)
             {
                 if (addedCount >= added.size())
-                    throw std::logic_error("ABJNNUE V8 incremental add list overflow");
+                    throw std::logic_error("ABJNNUE V11 incremental add list overflow");
                 added[addedCount++] = index;
             }
             else
             {
                 if (removedCount >= removed.size())
-                    throw std::logic_error("ABJNNUE V8 incremental remove list overflow");
+                    throw std::logic_error("ABJNNUE V11 incremental remove list overflow");
                 removed[removedCount++] = index;
             }
         };
-        append(boardIndex(dirty.from, dirty.pc), false);
-        if (dirty.to != SQ_NONE) append(boardIndex(dirty.to, dirty.pc), true);
-        if (dirty.add_sq != SQ_NONE) append(boardIndex(dirty.add_sq, dirty.add_pc), true);
-        if (dirty.remove_sq != SQ_NONE) append(boardIndex(dirty.remove_sq, dirty.remove_pc), false);
+        const bool revealedDarkMove = dirty.pc == DARK_PIECE && dirty.to == SQ_NONE
+                                   && dirty.add_sq != SQ_NONE;
+        if (revealedDarkMove)
+        {
+            append(darkBoardIndex(dirty.from, color_of(dirty.add_pc)), false);
+            append(boardIndex(dirty.add_sq, dirty.add_pc), true);
+        }
+        else
+        {
+            append(boardIndex(dirty.from, dirty.pc), false);
+            if (dirty.to != SQ_NONE) append(boardIndex(dirty.to, dirty.pc), true);
+            if (dirty.add_sq != SQ_NONE) append(boardIndex(dirty.add_sq, dirty.add_pc), true);
+        }
+        if (dirty.remove_sq != SQ_NONE)
+        {
+            const auto index = dirty.remove_pc == DARK_PIECE
+                                 ? darkBoardIndex(dirty.remove_sq, after.removedDarkOwner)
+                                 : boardIndex(dirty.remove_sq, dirty.remove_pc);
+            append(index, false);
+        }
         for (Color owner : {WHITE, BLACK})
             for (std::size_t typeIndex = 0; typeIndex < std::size(RestOrder); ++typeIndex)
             {
@@ -738,7 +611,10 @@ AccumulatorStack::View AccumulatorStack::evaluate(const Model& model, const Posi
         }
     }
     return {current.accumulated, current.metadata.layerStackBucket,
-            current.metadata.blendQ8, current.metadata.darkSquares};
+            current.metadata.blendQ8, current.metadata.darkSquares,
+            FeatureEncoder::inventory_context(current.metadata.restCounts,
+                                              current.metadata.darkCounts,
+                                              position.side_to_move())};
 }
 
 AccumulatorStack::View AccumulatorStack::evaluate(const Model& model,
@@ -772,7 +648,10 @@ AccumulatorStack::View AccumulatorStack::evaluate(const Model& model,
         }
     }
     return {current.accumulated, current.metadata.layerStackBucket,
-            current.metadata.blendQ8, current.metadata.darkSquares};
+            current.metadata.blendQ8, current.metadata.darkSquares,
+            FeatureEncoder::inventory_context(current.metadata.restCounts,
+                                              current.metadata.darkCounts,
+                                              position.side_to_move())};
 }
 
 }  // namespace ABJNNUE

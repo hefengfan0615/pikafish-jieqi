@@ -59,11 +59,10 @@ int runtime_material(const Position& pos) {
 }
 
 Value runtime_value(const ::ABJNNUE::RawEvaluation& raw, const Position& pos, int optimism) {
-    const int nnue          = (raw.psqtRaw + raw.positionalRaw) / 16;
-    const int complexity    = std::abs(raw.psqtRaw - raw.positionalRaw) / 16;
+    const int nnue          = raw.positionalRaw / 16;
     const int material      = runtime_material(pos);
     const int materialScale = 935 + material * 93 / 5116;
-    const int optimismTerm  = optimism * (complexity + 333) / 256;
+    const int optimismTerm  = optimism * 333 / 256;
 
     int value = (nnue * materialScale + optimismTerm * (materialScale - 832)) / 1024;
     value     = value * (218 - std::min(pos.rule40_count(), 120)) / 176;
@@ -83,7 +82,8 @@ Value runtime_value(const ::ABJNNUE::RawEvaluation& raw, const Position& pos, in
     return ::ABJNNUE::Inference::evaluate_accumulated(networks.big.model(), pos, view.accumulated,
                                                       ::ABJNNUE::LayerStackSelection{
                                                         view.layerStackBucket,
-                                                        view.layerStackBlendQ8});
+                                                        view.layerStackBlendQ8},
+                                                      view.inventoryContext);
 }
 
 }  // namespace
@@ -123,7 +123,6 @@ std::string Eval::trace(Position& pos, const Eval::NNUE::Networks& networks) {
 
     std::stringstream ss;
     ss << "\nABJNNUE runtime evaluation\n"
-       << "PSQT raw              " << raw.psqtRaw << "\n"
        << "Positional raw        " << raw.positionalRaw << "\n"
        << "Runtime value         " << value << " (side to move)\n";
 

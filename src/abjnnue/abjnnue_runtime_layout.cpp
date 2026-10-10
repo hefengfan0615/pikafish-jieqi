@@ -12,10 +12,12 @@ RuntimeLayout RuntimeLayout::bind(const Package& package) {
     if (primary.size != PrimarySize || heads.size != EvalHeadsSize
         || scoreToMass.size != ProbabilityScoreToMassSize * sizeof(std::int32_t)
         || massToScore.size != ProbabilityMassToScoreSize * sizeof(std::int32_t))
-        throw std::runtime_error("ABJCHESSV82 runtime chunk size mismatch");
+        throw std::runtime_error("ABJCHESSV11 runtime chunk size mismatch");
     layout.transformerBiases = {primary.data, TransformerBiasesSize};
     layout.featureWeights = {primary.data + TransformerBiasesSize, FeatureWeightsSize};
-    layout.psqtWeights = {primary.data + TransformerBiasesSize + FeatureWeightsSize, PSQTWeightsSize};
+    layout.contextBiases = {primary.data + TransformerBiasesSize + FeatureWeightsSize,
+                            ContextBiasesSize};
+    layout.contextWeights = {layout.contextBiases.data + ContextBiasesSize, ContextWeightsSize};
     layout.evalHeads = heads;
     layout.probabilityScoreToMass = scoreToMass;
     layout.probabilityMassToScore = massToScore;
@@ -24,7 +26,9 @@ RuntimeLayout RuntimeLayout::bind(const Package& package) {
 
 bool RuntimeLayout::inference_complete() const noexcept {
     return transformerBiases.size == TransformerBiasesSize
-        && featureWeights.size == FeatureWeightsSize && psqtWeights.size == PSQTWeightsSize
+        && featureWeights.size == FeatureWeightsSize
+        && contextBiases.size == ContextBiasesSize
+        && contextWeights.size == ContextWeightsSize
         && evalHeads.size == EvalHeadsSize;
 }
 

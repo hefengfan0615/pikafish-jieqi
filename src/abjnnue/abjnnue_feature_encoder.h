@@ -79,8 +79,14 @@ struct EncodedPosition {
     std::uint32_t layerStackBucket = 0;
     LayerStackSelection layerStackSelection{};
     std::size_t   darkSquares      = 0;
+    std::array<std::uint8_t, Stockfish::COLOR_NB> darkCounts{};
     std::array<PerspectiveFeatures, Stockfish::COLOR_NB> perspectives;
 };
+
+// Rest counts use the accumulator order {ROOK, CANNON, KNIGHT, BISHOP, ADVISOR, PAWN}.
+using InventoryRestCounts =
+  std::array<std::array<std::uint8_t, 6>, Stockfish::COLOR_NB>;
+using InventoryDarkCounts = std::array<std::uint8_t, Stockfish::COLOR_NB>;
 
 struct KingTransform {
     std::uint32_t bucket = 0;
@@ -88,11 +94,8 @@ struct KingTransform {
 };
 
 using AccumulatorVector = std::array<std::int16_t, RuntimeLayout::AccumulatorWidth>;
-using PSQTVector = std::array<std::int32_t, RuntimeLayout::PSQTBuckets>;
-
 struct PerspectiveAccumulation {
     AccumulatorVector values{};
-    PSQTVector        psqt{};
 };
 
 struct AccumulatedPosition {
@@ -107,15 +110,27 @@ class FeatureEncoder {
     static LayerStackSelection layer_stack_selection(const Stockfish::Position& position);
     static std::uint32_t attack_bucket(const Stockfish::Position& position,
                                        Stockfish::Color perspective);
+    static std::array<std::uint8_t, Stockfish::COLOR_NB> attack_buckets(
+      const Stockfish::Position& position);
     static bool requires_mid_mirror(const Stockfish::Position& position,
                                     Stockfish::Color perspective);
+    static std::array<bool, Stockfish::COLOR_NB> requires_mid_mirrors(
+      const Stockfish::Position& position);
     static KingTransform king_transform(const Stockfish::Position& position,
                                         Stockfish::Color perspective);
+    static KingTransform king_transform(const Stockfish::Position& position,
+                                        Stockfish::Color perspective,
+                                        bool midMirror);
     static std::uint32_t board_index(Stockfish::Color perspective,
                                      Stockfish::Square square,
                                      Stockfish::Piece piece,
                                      std::uint32_t bucket,
                                      bool mirror);
+    static std::uint32_t dark_board_index(Stockfish::Color perspective,
+                                          Stockfish::Color owner,
+                                          Stockfish::Square square,
+                                          std::uint32_t bucket,
+                                          bool mirror);
     static std::uint32_t meta_index(Stockfish::Color perspective,
                                     std::uint32_t bucket,
                                     std::uint32_t offset);
@@ -123,6 +138,11 @@ class FeatureEncoder {
                                          Stockfish::Color owner,
                                          Stockfish::PieceType type,
                                          std::uint32_t bucket);
+    static InventoryContext inventory_context(const Stockfish::Position& position,
+                                              Stockfish::Color perspective);
+    static InventoryContext inventory_context(const InventoryRestCounts& restCounts,
+                                              const InventoryDarkCounts& darkCounts,
+                                              Stockfish::Color perspective);
 
     static EncodedPosition encode(const Stockfish::Position& position);
     static AccumulatedPosition accumulate(const Model& model,

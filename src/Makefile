@@ -432,7 +432,7 @@ endif
 CXXFLAGS = $(ENV_CXXFLAGS) -Wall -Wcast-qual -std=c++17 $(EXTRACXXFLAGS)
 
 # Enable the AB-JChess NNUE ABI and the worker-local accumulator refresh cache.
-CXXFLAGS += -DABJCHESS_V8
+CXXFLAGS += -DABJCHESS_V11
 ABJNNUE_RUNTIME_REFRESH_CACHE ?= yes
 ifeq ($(ABJNNUE_RUNTIME_REFRESH_CACHE),yes)
     CXXFLAGS += -DABJNNUE_RUNTIME_REFRESH_CACHE
